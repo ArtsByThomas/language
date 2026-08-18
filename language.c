@@ -5,7 +5,7 @@
 #define MAX_WORDS 100    
 #define MAX_WORD_LEN 256 
 int main() {
-    FILE *file = fopen("soubor.txt", "r");
+    FILE *file = fopen("ahoj.txt", "r");
     if (file == NULL) {
         perror("Chyba při otevírání souboru");
         return 1;
@@ -19,7 +19,7 @@ int main() {
     int ch;
 
     while ((ch = fgetc(file)) != EOF) {
-        if (ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r') {
+        if (ch == ' ') {
             if (i > 0) { 
                 buffer[i] = '\0'; 
                 
@@ -38,14 +38,30 @@ int main() {
         }
     }
 
-
-
     fclose(file);
 
-    printf("\n--- Všechna načtená slova v poli (%d slov) ---\n", word_count);
-    for (int j = 0; j < word_count; j++) {
-        printf("Slovo na indexu %d: %s\n", j, words[j]);
-    }
+for (size_t i = 0; i < word_count; i++) 
+{
 
+    if (strcmp(words[i], "Vypiš") == 0) {
+        if (i + 1 < word_count) {
+            
+            char *next_word = words[i + 1]; 
+            
+            if (next_word[0] == '"') {
+                
+                for (size_t j = 0; j < strlen(next_word); j++) 
+                {
+                   
+                    if (next_word[j] != '"') {
+                        printf("%c", next_word[j]);
+                    }
+                }
+                printf("\n");
+            }
+        }
+    }
+ 
+}
     return 0;
 }
