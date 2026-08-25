@@ -72,7 +72,7 @@ typedef struct {
 } Symbol;
 
 typedef struct { 
-    char name[64]; char members[50][64]; int member_offsets[50];
+    char name[64]; char members[50][64]; int member_offsets[50]; int member_is_array[50];
     int count; int total_bytes;
 } StructDef;
 
@@ -94,8 +94,20 @@ int get_member_offset(const char* s_name, const char* m_name, int step, int line
     error_at(line, "Vlastnost ve strukture neexistuje!");
     return 0;
 }
+int get_member_is_array(const char* s_name, const char* m_name) {
+    for(int i=0; i<struct_count; i++) {
+        if(strncmp(struct_registry[i].name, s_name, 63)==0) {
+            for(int j=0; j<struct_registry[i].count; j++) {
+                if(strncmp(struct_registry[i].members[j], m_name, 63)==0) return struct_registry[i].member_is_array[j];
+            }
+        }
+    }
+    return 0;
+}
 
 Symbol sym_table[2000]; int sym_count = 0; int current_local_offset = 0;
+int codegen_method_sym_start = -1;
+int codegen_method_sym_end = 1000000;
 
 void add_global_symbol(const char *name) { 
     strncpy(sym_table[sym_count].name, name, MAX_TOKEN_LEN-1); 
@@ -111,7 +123,11 @@ void add_local_symbol(const char *name, int byte_size, int d1, int d2, const cha
 }
 
 Symbol* find_symbol(const char *name) {
-    for (int i = sym_count - 1; i >= 0; i--) if (strncmp(sym_table[i].name, name, MAX_TOKEN_LEN-1) == 0) return &sym_table[i];
+    for (int i = sym_count - 1; i >= 0; i--) {
+        if (strncmp(sym_table[i].name, name, MAX_TOKEN_LEN-1) == 0) {
+            if (codegen_method_sym_start < 0 || sym_table[i].is_global || (i >= codegen_method_sym_start && i < codegen_method_sym_end)) return &sym_table[i];
+        }
+    }
     return NULL;
 }
 
@@ -228,7 +244,7 @@ typedef enum {
 typedef struct AST_Node {
     AST_NodeType type; struct AST_Node *left; struct AST_Node *right; struct AST_Node *idx1; struct AST_Node *idx2;   
     struct AST_Node *alt; struct AST_Node **stmts; int stmt_count; char name[MAX_TOKEN_LEN]; char sub_name[MAX_TOKEN_LEN]; 
-    int int_val; TokenType op; int line;
+    int int_val; TokenType op; int line; int arg_count; int sym_start; int sym_end;
 } AST_Node;
 
 AST_Node* create_node(AST_NodeType type, int line) {
@@ -421,8 +437,9 @@ AST_Node* parse_program(Token tokens[], int token_count, int target_os) {
             struct_registry[struct_count].count = 0; int current_offset = 0;
             while (tokens[idx].type == TOKEN_IDENTIFIER) { 
                 strncpy(struct_registry[struct_count].members[struct_registry[struct_count].count], tokens[idx++].value, 63); 
-                int mem_size = step; if (tokens[idx].type == TOKEN_LBRACKET) { idx++; mem_size = atoi(tokens[idx].value) * step; idx += 2; }
+                int mem_size = step; int is_arr = 0; if (tokens[idx].type == TOKEN_LBRACKET) { idx++; mem_size = atoi(tokens[idx].value) * step; idx += 2; is_arr = 1; }
                 struct_registry[struct_count].member_offsets[struct_registry[struct_count].count] = current_offset;
+                struct_registry[struct_count].member_is_array[struct_registry[struct_count].count] = is_arr;
                 current_offset += mem_size; struct_registry[struct_count].count++;
             }
             struct_registry[struct_count].total_bytes = current_offset; idx++; struct_count++;
@@ -440,9 +457,9 @@ AST_Node* parse_program(Token tokens[], int token_count, int target_os) {
         }
         else if (tokens[idx].type == TOKEN_METODA) {
             AST_Node* method = create_node(AST_METHOD, tokens[idx].line); strncpy(method->name, tokens[idx+1].value, MAX_TOKEN_LEN-1); idx += 2;
-            current_local_offset = 0; 
+            current_local_offset = 0; int arg_idx = 0; method->sym_start = sym_count;
             if (tokens[idx].type == TOKEN_LPAREN) {
-                idx++; int arg_idx = 0;
+                idx++;
                 while (tokens[idx].type != TOKEN_RPAREN && tokens[idx].type != TOKEN_EOF) {
                     if (tokens[idx].type == TOKEN_IDENTIFIER) {
                         strncpy(sym_table[sym_count].name, tokens[idx].value, MAX_TOKEN_LEN-1); sym_table[sym_count].is_global = 0; sym_table[sym_count].offset = -((arg_idx + 2) * step); sym_table[sym_count].type_name[0] = '\0'; sym_count++; arg_idx++; idx++;
@@ -465,7 +482,9 @@ AST_Node* parse_program(Token tokens[], int token_count, int target_os) {
             }
             if (tokens[idx].type == TOKEN_LBRACE) idx++; 
             method->right = parse_block(tokens, &idx, step); 
+            method->sym_end = sym_count;
             method->int_val = current_local_offset > 256 ? current_local_offset : 256; 
+            method->arg_count = arg_idx;
             root->stmts[root->stmt_count++] = method;
         } else {
             AST_Node* stmt = parse_statement(tokens, &idx, step);
@@ -493,9 +512,13 @@ void generate_expr(FILE *out, AST_Node *expr, int is_k, const char *ax, const ch
         Symbol *s = find_symbol(expr->name);
         if (!s) error_at(expr->line, "Nedeklarovana promenna!");
         int real_offset = get_member_offset(s->type_name, expr->sub_name, step, expr->line);
+        int is_arr = get_member_is_array(s->type_name, expr->sub_name);
         if (s->is_global) fprintf(out, "    mov %s, [%s gvar_%s]\n", ax, is_k ? "" : "rel", s->name);
         else fprintf(out, "    mov %s, [%s %s %d]\n", ax, bp, O_SIGN(s->offset), O_ABS(s->offset));
-        if (real_offset == 0) fprintf(out, "    mov %s, [%s]\n", ax, ax);
+        if (is_arr) {
+            if (real_offset != 0) fprintf(out, "    add %s, %d\n", ax, real_offset);
+        }
+        else if (real_offset == 0) fprintf(out, "    mov %s, [%s]\n", ax, ax);
         else fprintf(out, "    mov %s, [%s + %d]\n", ax, ax, real_offset);
     }
     else if (expr->op == TOKEN_CTI_ADRESU) { generate_expr(out, expr->left, is_k, ax, bx, bp, step); fprintf(out, "    mov %s, [%s]\n", ax, ax); }
@@ -513,10 +536,17 @@ void generate_expr(FILE *out, AST_Node *expr, int is_k, const char *ax, const ch
         fprintf(out, "    sub rsp, 32\n"); 
         fprintf(out, "    call %s\n", expr->name);
         fprintf(out, "    add rsp, 32\n"); 
+        if (!is_k && (strcmp(expr->name, "fgetc") == 0 || strcmp(expr->name, "getchar") == 0 || strcmp(expr->name, "fputc") == 0 || strcmp(expr->name, "putchar") == 0 || strcmp(expr->name, "strcmp") == 0 || strcmp(expr->name, "system") == 0)) {
+            fprintf(out, "    cdqe\n");
+        }
         
         if (expr->stmt_count > 4) {
             fprintf(out, "    add %s, %d\n", is_k?"esp":"rsp", (expr->stmt_count - 4) * step);
         }
+    }
+    else if (expr->op == TOKEN_MINUS && expr->left && !expr->right) {
+        generate_expr(out, expr->left, is_k, ax, bx, bp, step);
+        fprintf(out, "    neg %s\n", ax);
     }
     else if (expr->left && expr->right) {
         generate_expr(out, expr->right, is_k, ax, bx, bp, step); fprintf(out, "    push %s\n", is_k?"eax":"rax");
@@ -660,13 +690,20 @@ void generate_asm_file(AST_Node* ast, Token tokens[], int token_count, const cha
     generate_ast(out, ast, target_os, -1, -1); 
 
     fprintf(out, "\n    xor rax, rax\n    mov rsp, rbp\n    pop rbp\n");
-    fprintf(out, "    sub rsp, 32\n    xor rcx, rcx\n    call exit\n");
+    fprintf(out, "    sub rsp, 40\n    xor rcx, rcx\n    call exit\n");
     
     for (int i = 0; i < ast->stmt_count; i++) {
         if (ast->stmts[i]->type == AST_METHOD) {
             int req_stack = ast->stmts[i]->int_val; int aligned_stack = (req_stack + 15) & ~15;
             fprintf(out, "%s:\n    push %s\n    mov %s, %s\n    sub %s, %d\n", ast->stmts[i]->name, is_k?"ebp":"rbp", is_k?"ebp":"rbp", is_k?"esp":"rsp", is_k?"esp":"rsp", aligned_stack);
+            int ac = ast->stmts[i]->arg_count;
+            const char *pregs[4] = {"rcx","rdx","r8","r9"};
+            for (int p = 0; p < ac && p < 4; p++) fprintf(out, "    mov [%s + %d], %s\n", is_k?"ebp":"rbp", 16 + p*8, pregs[p]);
+            codegen_method_sym_start = ast->stmts[i]->sym_start;
+            codegen_method_sym_end = ast->stmts[i]->sym_end;
             generate_ast(out, ast->stmts[i]->right, target_os, -1, -1);
+            codegen_method_sym_start = -1;
+            codegen_method_sym_end = 1000000;
             fprintf(out, "    mov %s, %s\n    pop %s\n    ret\n\n", is_k?"esp":"rsp", is_k?"ebp":"rbp", is_k?"ebp":"rbp");
         }
     }
