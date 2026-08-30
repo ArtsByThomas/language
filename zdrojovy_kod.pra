@@ -15,6 +15,7 @@ Externi fgetc
 Externi fputc
 Externi exit
 Externi system
+Externi fflush
 Externi fprintf
 Externi fputs
 Externi realloc
@@ -23,6 +24,7 @@ Externi fread
 Externi fseek
 Externi ftell
 Externi rewind
+Externi setvbuf  // <--- PŘIDEJ TENTO ŘÁDEK
 Konstanta IR_OP_CMP_EQ = 12
 Konstanta IR_OP_CMP_NEQ = 13
 Konstanta IR_OP_CMP_LT = 14
@@ -95,7 +97,7 @@ Konstanta TOKEN_STRING = 33
 Konstanta TOKEN_PLUS = 67
 Konstanta TOKEN_MINUS = 44
 Konstanta TOKEN_EOF = 55
-
+Konstanta TOKEN_FLOAT = 98
 Konstanta AST_PROGRAM = 0
 Konstanta AST_EXPR = 5
 Konstanta AST_IF = 6
@@ -247,7 +249,7 @@ Globalni codegen_sym_start = 0
 Globalni codegen_sym_end = 0
 Globalni codegen_scoped = 0
 Globalni cekam_na_zahrn = 0
-
+Globalni globalni_float_id = 0
 Globalni pamet_struktur_clenove = 0
 Globalni pocet_struktur_clenu = 0
 Globalni pamet_struktur_def = 0
@@ -263,6 +265,471 @@ Globalni pocet_externu = 0
 
 // --- Vylepseni: opravny zasobnik pro "Pokracuj" uvnitr "Opakuj" (for) cyklu ---
 Globalni loop_continue_stack = 0
+Metoda JeCisteKonstantniVyraz(vyraz : AST_Node) {
+    Pokud (vyraz == 0) { Vrat 1 }
+    Pokud (vyraz->op == 34) { Vrat 1 } // TOKEN_NUMBER
+    Pokud (vyraz->op == 35) { Vrat 0 } // Promenne uvnitr cyklu se mohou menit
+    Pokud (vyraz->type == 20) { Vrat 0 } // Volani funkce neni konstanta
+    
+    Lokalni levy_ok = Volej JeCisteKonstantniVyraz(vyraz->left)
+    Lokalni pravy_ok = Volej JeCisteKonstantniVyraz(vyraz->right)
+    Pokud (levy_ok == 1 && pravy_ok == 1) { Vrat 1 }
+    Vrat 0
+}
+
+Metoda OptimalizujLICM(blok : AST_Node) {
+    Pokud (blok == 0) { Vrat 0 }
+    
+    Pokud (blok->type == 1) { // AST_BLOCK
+        Lokalni i = 0
+        Dokud (i < blok->stmt_count) {
+            Lokalni adr = blok->stmts + (i * 8)
+            Lokalni prikaz : AST_Node = Volej CtiUkazatel(adr)
+            
+            Pokud (prikaz != 0) {
+                Pokud (prikaz->type == 7 || prikaz->type == 8) { // WHILE (7) nebo FOR (8)
+                    Lokalni telo_cyklu : AST_Node = 0
+                    Pokud (prikaz->type == 7) { telo_cyklu = prikaz->right }
+                    Pokud (prikaz->type == 8) { telo_cyklu = Volej CtiUkazatel(prikaz->stmts) }
+                    
+                    Pokud (telo_cyklu != 0 && telo_cyklu->type == 1) {
+                        Lokalni c = 0
+                        Dokud (c < telo_cyklu->stmt_count) {
+                            Lokalni t_adr = telo_cyklu->stmts + (c * 8)
+                            Lokalni t_prikaz : AST_Node = Volej CtiUkazatel(t_adr)
+                            
+                            // Pokud je to prirazeni ciste konstantni matematiky
+                            Pokud (t_prikaz != 0 && t_prikaz->type == 4) { 
+                                Pokud (Volej JeCisteKonstantniVyraz(t_prikaz->right) == 1) {
+                                    Volej printf(">> LICM Magie (-O3): Vytahuji nemmenny vypocet '%s' pred cyklus!\n", t_prikaz->name)
+                                    
+                                    // Trik: Cyklus obalime novym blokem [Vytazeny_Prikaz, Samotny_Cyklus]
+                                    Lokalni novy_blok : AST_Node = Volej VytvorUzel(1, prikaz->line)
+                                    novy_blok->stmt_count = 2
+                                    novy_blok->stmts = Volej calloc(2, 8)
+                                    
+                                    Lokalni vytazeny = Volej KopirujUzel(t_prikaz)
+                                    Volej ZapisUkazatel(novy_blok->stmts + 0, vytazeny)
+                                    Volej ZapisUkazatel(novy_blok->stmts + 8, prikaz) 
+                                    
+                                    Volej ZapisUkazatel(adr, novy_blok)
+                                    prikaz = novy_blok 
+                                    
+                                    t_prikaz->type = 100 // V cyklu smazeme (AST_NOP)
+                                }
+                            }
+                            c = c + 1
+                        }
+                    }
+                }
+                Volej OptimalizujLICM(prikaz)
+            }
+            i = i + 1
+        }
+    }
+    
+    Pokud (blok->type == 6) { Volej OptimalizujLICM(blok->right); Pokud (blok->alt != 0) { Volej OptimalizujLICM(blok->alt) } }
+    Pokud (blok->type == 7 || blok->type == 8) { 
+        Pokud (blok->right != 0) { Volej OptimalizujLICM(blok->right) }
+        Pokud (blok->type == 8 && blok->stmts != 0) { Volej OptimalizujLICM(Volej CtiUkazatel(blok->stmts)) }
+    }
+    Pokud (blok->type == 10) { Volej OptimalizujLICM(blok->right) }
+    Vrat 0
+}
+Metoda OptimalizujDCE(koren : AST_Node) {
+    Pokud (koren == 0) { Vrat 0 }
+    
+    Pokud (koren->type == 1 || koren->type == 0) { // AST_BLOCK, AST_PROGRAM
+        Lokalni i = 0
+        Lokalni mrtvo = 0
+        Dokud (i < koren->stmt_count) {
+            Pokud (mrtvo == 1) {
+                // Odrizneme zbytek pole prikazu
+                koren->stmt_count = i
+                Volej printf(">> DCE Magie (-O3): Odstranen mrtvy kod za Ukonci/Vrat!\n")
+                Vrat 0
+            }
+            Lokalni adr = koren->stmts + (i * 8)
+            Lokalni prikaz : AST_Node = Volej CtiUkazatel(adr)
+            Pokud (prikaz != 0) {
+                // 11 = AST_RETURN, 22 = AST_BREAK, 23 = AST_CONTINUE
+                Pokud (prikaz->type == 11 || prikaz->type == 22 || prikaz->type == 23) {
+                    mrtvo = 1
+                } Jinak {
+                    Volej OptimalizujDCE(prikaz)
+                }
+            }
+            i = i + 1
+        }
+    }
+    
+    Pokud (koren->type == 6) { Volej OptimalizujDCE(koren->right); Pokud (koren->alt != 0) { Volej OptimalizujDCE(koren->alt) } }
+    Pokud (koren->type == 7 || koren->type == 8) { 
+        Pokud (koren->stmts != 0) { Volej OptimalizujDCE(Volej CtiUkazatel(koren->stmts)) }
+        Pokud (koren->right != 0) { Volej OptimalizujDCE(koren->right) }
+    }
+    Pokud (koren->type == 10) { Volej OptimalizujDCE(koren->right) }
+    
+    Vrat 0
+}
+Metoda OptimalizujBezpecnyInlining(koren : AST_Node) {
+    Pokud (koren == 0) { Vrat 0 }
+
+    Pokud (koren->type == 0 || koren->type == 1) { // 0 = AST_PROGRAM, 1 = AST_BLOCK
+        Lokalni i = 0
+        Dokud (i < koren->stmt_count) {
+            Lokalni adr = koren->stmts + (i * 8)
+            Lokalni prikaz : AST_Node = Volej CtiUkazatel(adr)
+            
+            Pokud (prikaz != 0) {
+                Pokud (prikaz->type == 20) { // 20 = AST_CALL
+                    Lokalni sym : Symbol = Volej NajdiSymbol(prikaz->name)
+                    Pokud (sym != 0 && sym->is_function == 1) {
+                        Lokalni func_ast : AST_Node = sym->func_node
+                        // POJISTKA: Bez argumentu A ZAROVEN bez lokalnich promennych
+                        Pokud (func_ast->arg_count == 0 && func_ast->int_val == 0) {
+                            Volej printf(">> Safe Inlining (-O3): Vkladam telo metody '%s'!\n", prikaz->name)
+                            Lokalni klonovane_telo = Volej KopirujUzel(func_ast->right)
+                            Volej ZapisUkazatel(adr, klonovane_telo)
+                        }
+                    }
+                } Jinak {
+                    Volej OptimalizujBezpecnyInlining(prikaz)
+                }
+            }
+            i = i + 1
+        }
+    }
+    
+    Pokud (koren->type == 6) { Volej OptimalizujBezpecnyInlining(koren->right); Pokud (koren->alt != 0) { Volej OptimalizujBezpecnyInlining(koren->alt) } }
+    Pokud (koren->type == 7 || koren->type == 8) { 
+        Pokud (koren->stmts != 0) { Volej OptimalizujBezpecnyInlining(Volej CtiUkazatel(koren->stmts)) }
+        Pokud (koren->right != 0) { Volej OptimalizujBezpecnyInlining(koren->right) }
+    }
+    Pokud (koren->type == 10) { Volej OptimalizujBezpecnyInlining(koren->right) }
+    
+    Vrat 0
+}
+Metoda OptimalizujCSE(blok : AST_Node) {
+    Pokud (blok == 0) { Vrat 0 }
+    Pokud (blok->type == 1) { // 1 = AST_BLOCK
+        Lokalni i = 0
+        Dokud (i < (blok->stmt_count - 1)) {
+            Lokalni prikaz1 : AST_Node = Volej CtiUkazatel(blok->stmts + (i * 8))
+            Lokalni prikaz2 : AST_Node = Volej CtiUkazatel(blok->stmts + ((i + 1) * 8))
+            
+            // Pokud jsou to obe prirazeni
+            Pokud (prikaz1 != 0 && prikaz2 != 0 && prikaz1->type == 4 && prikaz2->type == 4) { // 4 = AST_ASSIGN
+                Lokalni vyraz1 : AST_Node = prikaz1->right
+                Lokalni vyraz2 : AST_Node = prikaz2->right
+                
+                // Pokud jsou to obe binarmi operace stejneho typu (napr. TOKEN_MUL)
+                Pokud (vyraz1 != 0 && vyraz2 != 0 && vyraz1->op == vyraz2->op && vyraz1->left != 0 && vyraz1->right != 0) {
+                    Lokalni l1 : AST_Node = vyraz1->left; Lokalni r1 : AST_Node = vyraz1->right
+                    Lokalni l2 : AST_Node = vyraz2->left; Lokalni r2 : AST_Node = vyraz2->right
+                    
+                    // Pokud jsou operandy identicke promenne/konstanty
+                    Pokud (l1->op == l2->op && r1->op == r2->op && Volej strcmp(l1->name, l2->name) == 0 && Volej strcmp(r1->name, r2->name) == 0) {
+                        
+                        Volej printf(">> CSE Magie (-O3): Nalezen shodny vypocet, pouzivam predchozi vysledek '%s'!\n", prikaz1->name)
+                        
+                        // Zmenime druhy vyraz jen na nacteni proměnné z prvniho prikazu
+                        vyraz2->op = 35 // TOKEN_IDENTIFIER
+                        Volej strncpy(vyraz2->name, prikaz1->name, 255)
+                        vyraz2->left = 0
+                        vyraz2->right = 0
+                    }
+                }
+            }
+            Volej OptimalizujCSE(prikaz1)
+            i = i + 1
+        }
+    }
+    
+    // Prohledame vnoreni
+    Pokud (blok->type == 10) { Volej OptimalizujCSE(blok->right) } // AST_METHOD
+    Pokud (blok->type == 7 || blok->type == 6) { Volej OptimalizujCSE(blok->right); Pokud (blok->alt != 0) { Volej OptimalizujCSE(blok->alt) } }
+    Vrat 0
+}
+Metoda OptimalizujInlining(koren : AST_Node) {
+    Pokud (koren == 0) { Vrat 0 }
+
+    // Prochazime program nebo blok
+    Pokud (koren->type == 0 || koren->type == 1) { // 0 = AST_PROGRAM, 1 = AST_BLOCK
+        Lokalni i = 0
+        Dokud (i < koren->stmt_count) {
+            Lokalni adr = koren->stmts + (i * 8)
+            Lokalni prikaz : AST_Node = Volej CtiUkazatel(adr)
+            
+            Pokud (prikaz != 0) {
+                Pokud (prikaz->type == 20) { // 20 = AST_CALL
+                    Lokalni sym : Symbol = Volej NajdiSymbol(prikaz->name)
+                    // Inlinujeme jen metody, ktere nemaji argumenty (vyhneme se kolizi jmen promennych)
+                    Pokud (sym != 0 && sym->is_function == 1) {
+                        Lokalni func_ast : AST_Node = sym->func_node
+                        Pokud (func_ast->arg_count == 0) {
+                            Volej printf(">> Inlining Magie (-O3): Vkladam telo metody '%s' primo do kodu!\n", prikaz->name)
+                            Lokalni klonovane_telo = Volej KopirujUzel(func_ast->right) // Pravy uzel metody je vzdy AST_BLOCK
+                            Volej ZapisUkazatel(adr, klonovane_telo)
+                        }
+                    }
+                } Jinak {
+                    // Rekurze do hloubky
+                    Volej OptimalizujInlining(prikaz)
+                }
+            }
+            i = i + 1
+        }
+    }
+    
+    // Prochazime vnorene struktury
+    Pokud (koren->type == 6) { // AST_IF
+        Volej OptimalizujInlining(koren->right)
+        Pokud (koren->alt != 0) { Volej OptimalizujInlining(koren->alt) }
+    }
+    Pokud (koren->type == 7 || koren->type == 8) { // AST_WHILE, AST_FOR
+        Volej OptimalizujInlining(koren->right)
+        Volej OptimalizujInlining(koren->stmts)
+    }
+    Pokud (koren->type == 10) { // AST_METHOD
+        Volej OptimalizujInlining(koren->right)
+    }
+    
+    Vrat 0
+}
+Metoda KopirujUzel(uzel : AST_Node) {
+    Pokud (uzel == 0) { Vrat 0 }
+    
+    Lokalni kopie : AST_Node = Volej VytvorUzel(uzel->type, uzel->line)
+    kopie->op = uzel->op
+    kopie->int_val = uzel->int_val
+    Volej strncpy(kopie->name, uzel->name, 255)
+    Volej strncpy(kopie->sub_name, uzel->sub_name, 63)
+    Volej strncpy(kopie->type_name, uzel->type_name, 63)
+
+    kopie->left = Volej KopirujUzel(uzel->left)
+    kopie->right = Volej KopirujUzel(uzel->right)
+    kopie->alt = Volej KopirujUzel(uzel->alt)
+
+    Pokud (uzel->stmt_count > 0) {
+        kopie->stmts = Volej calloc(uzel->stmt_count, 8)
+        kopie->stmt_count = uzel->stmt_count
+        Lokalni i = 0
+        Dokud (i < uzel->stmt_count) {
+            Lokalni adr = uzel->stmts + (i * 8)
+            Lokalni pod_uzel : AST_Node = Volej CtiUkazatel(adr)
+            Lokalni p_kopie = Volej KopirujUzel(pod_uzel)
+            Volej ZapisUkazatel(kopie->stmts + (i * 8), p_kopie)
+            i = i + 1
+        }
+    }
+    Vrat kopie
+}
+Metoda OptimalizujSCEV(uzel_cyklu : AST_Node) {
+    Pokud (uzel_cyklu->type != 7) { Vrat 0 } // 7 = AST_WHILE
+    
+    // 1. Zjisteni podminky: promenna < MAX
+    Lokalni podminka : AST_Node = uzel_cyklu->left
+    Pokud (podminka == 0 || podminka->op != 45) { Vrat 0 } // 45 = TOKEN_LESS
+    
+    Lokalni iter_uzel : AST_Node = podminka->left
+    Lokalni max_uzel : AST_Node = podminka->right
+    Pokud (iter_uzel == 0 || max_uzel == 0) { Vrat 0 }
+    Pokud (iter_uzel->op != 35) { Vrat 0 } // 35 = TOKEN_IDENTIFIER
+    
+    Lokalni iter_jmeno = iter_uzel->name
+    
+    // 2. Kontrola tela cyklu (musi to byt blok s 1 nebo 2 prikazy)
+    Lokalni telo : AST_Node = uzel_cyklu->right
+    Pokud (telo == 0 || telo->type != 1) { Vrat 0 } // OPRAVA: AST_BLOCK je 1 (bylo 10)
+    Pokud (telo->stmt_count == 0 || telo->stmt_count > 2) { Vrat 0 }
+    
+    // 3. Posledni prikaz musi byt zvysovani iteratoru: i = i + 1
+    Lokalni posl_adr = telo->stmts + ((telo->stmt_count - 1) * 8)
+    Lokalni posl_prikaz : AST_Node = Volej CtiUkazatel(posl_adr)
+    
+    Pokud (posl_prikaz->type != 4) { Vrat 0 } // 4 = AST_ASSIGN
+    Pokud (Volej strcmp(posl_prikaz->name, iter_jmeno) != 0) { Vrat 0 }
+    
+    Lokalni inkrement : AST_Node = posl_prikaz->right
+    Pokud (inkrement == 0 || inkrement->op != 67) { Vrat 0 } // OPRAVA: TOKEN_PLUS je 67 (bylo 43)
+    Lokalni ink_l : AST_Node = inkrement->left
+    Lokalni ink_p : AST_Node = inkrement->right
+    Pokud (ink_l == 0 || ink_p == 0) { Vrat 0 }
+    Pokud (ink_l->op != 35 || Volej strcmp(ink_l->name, iter_jmeno) != 0) { Vrat 0 }
+    Pokud (ink_p->op != 34) { Vrat 0 } // 34 = TOKEN_NUMBER
+    Pokud (Volej atoi(ink_p->name) != 1) { Vrat 0 } // Zatim resime jen krok +1
+    
+    // ========================================================
+    // MAGIE A: Prazdny cyklus
+    // ========================================================
+    Pokud (telo->stmt_count == 1) {
+        Volej printf(">> SCEV Magie (-O3): Prazdny cyklus '%s' preveden na O(1) cas!\n", iter_jmeno)
+        uzel_cyklu->type = 4 
+        Volej strncpy(uzel_cyklu->name, iter_jmeno, 255)
+        
+        Lokalni novy_max : AST_Node = Volej VytvorUzel(5, uzel_cyklu->line) 
+        novy_max->op = max_uzel->op
+        Volej strncpy(novy_max->name, max_uzel->name, 255)
+        
+        uzel_cyklu->right = novy_max
+        uzel_cyklu->left = 0
+        Vrat 1
+    }
+    
+    // ========================================================
+    // MAGIE B: Cyklus sbirajici soucet (suma = suma + X)
+    // ========================================================
+    Pokud (telo->stmt_count == 2) {
+        Lokalni prvni_adr = telo->stmts + 0
+        Lokalni prvni_prikaz : AST_Node = Volej CtiUkazatel(prvni_adr)
+        
+        Pokud (prvni_prikaz->type == 4) { 
+            Lokalni suma_jmeno = prvni_prikaz->name
+            Lokalni s_vyraz : AST_Node = prvni_prikaz->right
+            Pokud (s_vyraz != 0 && s_vyraz->op == 67) { // OPRAVA: TOKEN_PLUS je 67 (bylo 43)
+                Lokalni s_levy : AST_Node = s_vyraz->left
+                Lokalni s_pravy : AST_Node = s_vyraz->right
+                
+                Pokud (s_levy != 0 && s_pravy != 0 && s_levy->op == 35 && Volej strcmp(s_levy->name, suma_jmeno) == 0 && s_pravy->op == 34) {
+                    
+                    Volej printf(">> SCEV Magie (-O3): Soucet v cyklu '%s' preveden na O(1) matematiku!\n", iter_jmeno)
+                    
+                    uzel_cyklu->type = 1 // OPRAVA: AST_BLOCK je 1 (bylo 10)
+                    uzel_cyklu->stmts = Volej calloc(2, 8)
+                    uzel_cyklu->stmt_count = 2
+                    
+                    Lokalni a_suma : AST_Node = Volej VytvorUzel(4, uzel_cyklu->line)
+                    Volej strncpy(a_suma->name, suma_jmeno, 255)
+                    
+                    Lokalni st_plus : AST_Node = Volej VytvorUzel(5, uzel_cyklu->line); st_plus->op = 67 // OPRAVA: TOKEN_PLUS = 67
+                    Lokalni st_suma_id : AST_Node = Volej VytvorUzel(5, uzel_cyklu->line); st_suma_id->op = 35
+                    Volej strncpy(st_suma_id->name, suma_jmeno, 255)
+                    Lokalni st_mul : AST_Node = Volej VytvorUzel(5, uzel_cyklu->line); st_mul->op = 49 // Nasobeni
+                    Lokalni st_sub : AST_Node = Volej VytvorUzel(5, uzel_cyklu->line); st_sub->op = 44 // Odcitani
+                    
+                    Lokalni k_max : AST_Node = Volej VytvorUzel(5, uzel_cyklu->line); k_max->op = max_uzel->op
+                    Volej strncpy(k_max->name, max_uzel->name, 255)
+                    Lokalni k_iter : AST_Node = Volej VytvorUzel(5, uzel_cyklu->line); k_iter->op = 35
+                    Volej strncpy(k_iter->name, iter_jmeno, 255)
+                    
+                    st_sub->left = k_max; st_sub->right = k_iter 
+                    
+                    Lokalni k_X : AST_Node = Volej VytvorUzel(5, uzel_cyklu->line); k_X->op = s_pravy->op
+                    Volej strncpy(k_X->name, s_pravy->name, 255) 
+                    
+                    st_mul->left = st_sub; st_mul->right = k_X 
+                    st_plus->left = st_suma_id; st_plus->right = st_mul 
+                    
+                    a_suma->right = st_plus
+                    
+                    Lokalni a_iter : AST_Node = Volej VytvorUzel(4, uzel_cyklu->line)
+                    Volej strncpy(a_iter->name, iter_jmeno, 255)
+                    Lokalni k_max2 : AST_Node = Volej VytvorUzel(5, uzel_cyklu->line); k_max2->op = max_uzel->op
+                    Volej strncpy(k_max2->name, max_uzel->name, 255)
+                    a_iter->right = k_max2
+                    
+                    Volej ZapisUkazatel(uzel_cyklu->stmts + 0, a_suma)
+                    Volej ZapisUkazatel(uzel_cyklu->stmts + 8, a_iter)
+                    
+                    uzel_cyklu->left = 0
+                    uzel_cyklu->right = 0
+                    Vrat 1
+                }
+            }
+        }
+    }
+    Vrat 0
+}
+Metoda OptimalizujRozbaleniOpakuj(uzel_for : AST_Node) {
+    Pokud (uzel_for->type != 8) { Vrat 0 } // 8 = AST_FOR
+
+    Lokalni init_uzel : AST_Node = uzel_for->left
+    Lokalni cond_uzel : AST_Node = uzel_for->right
+    Lokalni inc_uzel : AST_Node = uzel_for->alt
+
+    // 1. Zjisteni startu (napr. i = 0)
+    Pokud (init_uzel == 0 || init_uzel->type != 4) { Vrat 0 } // 4 = AST_ASSIGN
+    Lokalni start_vyraz : AST_Node = init_uzel->right
+    Pokud (start_vyraz == 0 || start_vyraz->op != 34) { Vrat 0 } // 34 = TOKEN_NUMBER
+    Lokalni iter_jmeno = init_uzel->name
+    Lokalni start_val = Volej atoi(start_vyraz->name)
+
+    // 2. Zjisteni konce (napr. i < 5)
+    Pokud (cond_uzel == 0 || cond_uzel->op != 45) { Vrat 0 } // 45 = TOKEN_LESS
+    Lokalni cond_l : AST_Node = cond_uzel->left
+    Lokalni cond_p : AST_Node = cond_uzel->right
+    Pokud (cond_l == 0 || cond_p == 0) { Vrat 0 }
+    Pokud (cond_l->op != 35 || Volej strcmp(cond_l->name, iter_jmeno) != 0) { Vrat 0 } 
+    Pokud (cond_p->op != 34) { Vrat 0 }
+    Lokalni end_val = Volej atoi(cond_p->name)
+
+    // 3. Zjisteni kroku (napr. i += 1)
+    Pokud (inc_uzel == 0 || inc_uzel->type != 4) { Vrat 0 }
+    Pokud (Volej strcmp(inc_uzel->name, iter_jmeno) != 0) { Vrat 0 }
+    Lokalni inc_vyraz : AST_Node = inc_uzel->right
+    Pokud (inc_vyraz == 0 || inc_vyraz->op != 67) { Vrat 0 } // 67 = TOKEN_PLUS
+    Lokalni inc_p : AST_Node = inc_vyraz->right
+    Pokud (inc_p == 0 || inc_p->op != 34) { Vrat 0 }
+    Lokalni krok_val = Volej atoi(inc_p->name)
+
+    Pokud (krok_val != 1) { Vrat 0 } // Resime jen krok +1
+
+    Lokalni pocet_iteraci = end_val - start_val
+    
+    // Pokud je iteraci rozumna hrstka (1 az 10), cyklus rozbalime!
+    Pokud (pocet_iteraci > 0 && pocet_iteraci <= 10) {
+        Volej printf(">> Unrolling Magie (-O3): Opakuj cyklus '%s' se %d iteracemi rozbalen!\n", iter_jmeno, pocet_iteraci)
+
+        Lokalni telo : AST_Node = Volej CtiUkazatel(uzel_for->stmts)
+        Lokalni prikazu_v_tele = 1
+        Pokud (telo->type == 1) { prikazu_v_tele = telo->stmt_count } // 1 = AST_BLOCK
+
+        // Pretvoreni FOR cyklu na obycenjy AST_BLOCK
+        uzel_for->type = 1 
+        Lokalni celkem_prikazu = 1 + (pocet_iteraci * (prikazu_v_tele + 1))
+        Lokalni nove_stmts = Volej calloc(celkem_prikazu, 8)
+        Lokalni idx = 0
+
+        // A. Prikaz na inicializaci (i = 0)
+        Volej ZapisUkazatel(nove_stmts + (idx * 8), init_uzel)
+        idx = idx + 1
+
+        // B. N-krat za sebou zkopirujeme telo a inkrementaci
+        Lokalni iter = 0
+        Dokud (iter < pocet_iteraci) {
+            Pokud (telo->type == 1) {
+                Lokalni p = 0
+                Dokud (p < prikazu_v_tele) {
+                    Lokalni orig_prikaz : AST_Node = Volej CtiUkazatel(telo->stmts + (p * 8))
+                    Lokalni kopie_prikazu = Volej KopirujUzel(orig_prikaz)
+                    Volej ZapisUkazatel(nove_stmts + (idx * 8), kopie_prikazu)
+                    idx = idx + 1
+                    p = p + 1
+                }
+            } Jinak {
+                Lokalni kopie_prikazu2 = Volej KopirujUzel(telo)
+                Volej ZapisUkazatel(nove_stmts + (idx * 8), kopie_prikazu2)
+                idx = idx + 1
+            }
+
+            Lokalni kopie_incu = Volej KopirujUzel(inc_uzel)
+            Volej ZapisUkazatel(nove_stmts + (idx * 8), kopie_incu)
+            idx = idx + 1
+            iter = iter + 1
+        }
+
+        // C. Odstraneni pod-vetvi, uzel je nyni jen cisty blok!
+        uzel_for->stmts = nove_stmts
+        uzel_for->stmt_count = idx
+        uzel_for->left = 0
+        uzel_for->right = 0
+        uzel_for->alt = 0
+
+        Vrat 1
+    }
+    Vrat 0
+}
 Metoda ZkontrolujKapacituSymbolu() {
     Pokud (pocet_symbolu >= (kapacita_symbolu - 10)) {
         kapacita_symbolu = kapacita_symbolu * 2
@@ -322,64 +789,64 @@ Metoda EmitujIR(op, dest, s1, t1, s2, t2) {
 Metoda GenerujIR_Vyraz(uzel : AST_Node) {
     Pokud (uzel == 0) { Vrat 0 }
 
-    Pokud (uzel->op == TOKEN_NUMBER) {
+    // --- BEZPECNOSTNI POJISTKA PRO FPU A STRINGY ---
+    // Pokud je to Float nebo String, IR to vzda a necha preklad na velkem AST!
+    Lokalni typ_uzlu = Volej ZiskejTypUzlu(uzel)
+    Pokud (Volej strcmp(typ_uzlu, "Float") == 0) { Vrat 0 }
+    Pokud (Volej strcmp(typ_uzlu, "String") == 0) { Vrat 0 }
+
+    Pokud (uzel->op == 34) {
         Lokalni t = Volej NovyTempRegistr()
         Lokalni hodnota = Volej atoi(uzel->name)
-        Volej EmitujIR(IR_OP_LOAD_CONST, t, hodnota, 1, 0, 0)
+        Volej EmitujIR(1, t, hodnota, 1, 0, 0)
         Vrat t
     }
 
-    Pokud (uzel->op == TOKEN_IDENTIFIER) {
+    Pokud (uzel->op == 35) {
         Lokalni sym : Symbol = Volej NajdiSymbol(uzel->name)
         Pokud (sym->is_global || sym->is_const) { Vrat 0 } 
         
         Lokalni t2 = Volej NovyTempRegistr()
-        Volej EmitujIR(IR_OP_LOAD_VAR, t2, sym->offset, 2, 0, 0)
+        Volej EmitujIR(2, t2, sym->offset, 2, 0, 0)
         Vrat t2
     }
 
-    Pokud (uzel->op == TOKEN_PLUS || uzel->op == TOKEN_MINUS || uzel->op == TOKEN_MUL || uzel->op == TOKEN_DIV || uzel->op == TOKEN_EQEQ || uzel->op == TOKEN_NEQ || uzel->op == TOKEN_LESS || uzel->op == TOKEN_GREATER || uzel->op == TOKEN_LESSEQ || uzel->op == TOKEN_GREATEREQ || uzel->op == TOKEN_AMPER || uzel->op == TOKEN_PIPE || uzel->op == TOKEN_CARET || uzel->op == TOKEN_SHL || uzel->op == TOKEN_SHR) {
+    Pokud (uzel->op == 67 || uzel->op == 44 || uzel->op == 49 || uzel->op == 50 || uzel->op == 43 || uzel->op == 64 || uzel->op == 45 || uzel->op == 46 || uzel->op == 61 || uzel->op == 62 || uzel->op == 58 || uzel->op == 124 || uzel->op == 83 || uzel->op == 84 || uzel->op == 85) {
         
         Lokalni l_reg = Volej GenerujIR_Vyraz(uzel->left)
         Pokud (l_reg == 0) { Vrat 0 }
         
-        // ==========================================
-        // OPTIMALIZACE: Strength Reduction (Sila bitu)
-        // (Prepsano pro kompatibilitu s parserem)
-        // ==========================================
         Lokalni pravy_uzel : AST_Node = uzel->right
         Pokud (pravy_uzel != 0) {
-            Pokud (pravy_uzel->op == TOKEN_NUMBER) {
+            Pokud (pravy_uzel->op == 34) {
                 Lokalni val = Volej atoi(pravy_uzel->name)
-                Pokud (uzel->op == TOKEN_MUL) {
-                    Pokud (val == 2) { uzel->op = TOKEN_SHL; Volej sprintf(pravy_uzel->name, "1") }
-                    Jinak Pokud (val == 4) { uzel->op = TOKEN_SHL; Volej sprintf(pravy_uzel->name, "2") }
-                    Jinak Pokud (val == 8) { uzel->op = TOKEN_SHL; Volej sprintf(pravy_uzel->name, "3") }
-                    Jinak Pokud (val == 16) { uzel->op = TOKEN_SHL; Volej sprintf(pravy_uzel->name, "4") }
-                } Jinak Pokud (uzel->op == TOKEN_DIV) {
-                    Pokud (val == 2) { uzel->op = TOKEN_SHR; Volej sprintf(pravy_uzel->name, "1") }
-                    Jinak Pokud (val == 4) { uzel->op = TOKEN_SHR; Volej sprintf(pravy_uzel->name, "2") }
-                    Jinak Pokud (val == 8) { uzel->op = TOKEN_SHR; Volej sprintf(pravy_uzel->name, "3") }
-                    Jinak Pokud (val == 16) { uzel->op = TOKEN_SHR; Volej sprintf(pravy_uzel->name, "4") }
+                Pokud (uzel->op == 49) {
+                    Pokud (val == 2) { uzel->op = 84; Volej sprintf(pravy_uzel->name, "1") }
+                    Jinak Pokud (val == 4) { uzel->op = 84; Volej sprintf(pravy_uzel->name, "2") }
+                    Jinak Pokud (val == 8) { uzel->op = 84; Volej sprintf(pravy_uzel->name, "3") }
+                    Jinak Pokud (val == 16) { uzel->op = 84; Volej sprintf(pravy_uzel->name, "4") }
+                } Jinak Pokud (uzel->op == 50) {
+                    Pokud (val == 2) { uzel->op = 85; Volej sprintf(pravy_uzel->name, "1") }
+                    Jinak Pokud (val == 4) { uzel->op = 85; Volej sprintf(pravy_uzel->name, "2") }
+                    Jinak Pokud (val == 8) { uzel->op = 85; Volej sprintf(pravy_uzel->name, "3") }
+                    Jinak Pokud (val == 16) { uzel->op = 85; Volej sprintf(pravy_uzel->name, "4") }
                 }
             }
         }
-        // ==========================================
         
         Lokalni r_reg = 0
         Lokalni r_typ = 0
         Lokalni je_konstanta = 0
         
         Pokud (pravy_uzel != 0) {
-            Pokud (pravy_uzel->op == TOKEN_NUMBER) {
+            Pokud (pravy_uzel->op == 34) {
                 je_konstanta = 1
             }
         }
         
-        // Zrychleni: Umozni predavat prave argumenty jako ciste konstanty rovnou instrukci
         Pokud (je_konstanta == 1) {
             r_reg = Volej atoi(pravy_uzel->name)
-            r_typ = 1 // Prava strana je prima konstanta
+            r_typ = 1 
         } Jinak {
             r_reg = Volej GenerujIR_Vyraz(uzel->right)
             Pokud (r_reg == 0) { Vrat 0 }
@@ -388,35 +855,32 @@ Metoda GenerujIR_Vyraz(uzel : AST_Node) {
         Lokalni vysledek_reg = Volej NovyTempRegistr()
         Lokalni opcode = 0
         
-        Pokud (uzel->op == TOKEN_PLUS) { opcode = IR_OP_ADD }
-        Pokud (uzel->op == TOKEN_MINUS) { opcode = IR_OP_SUB }
-        Pokud (uzel->op == TOKEN_MUL) { opcode = IR_OP_MUL }
-        Pokud (uzel->op == TOKEN_DIV) { opcode = IR_OP_DIV }
-        Pokud (uzel->op == TOKEN_EQEQ) { opcode = IR_OP_CMP_EQ }
-        Pokud (uzel->op == TOKEN_NEQ) { opcode = IR_OP_CMP_NEQ }
-        Pokud (uzel->op == TOKEN_LESS) { opcode = IR_OP_CMP_LT }
-        Pokud (uzel->op == TOKEN_GREATER) { opcode = IR_OP_CMP_GT }
-        Pokud (uzel->op == TOKEN_LESSEQ) { opcode = IR_OP_CMP_LE }
-        Pokud (uzel->op == TOKEN_GREATEREQ) { opcode = IR_OP_CMP_GE }
-        Pokud (uzel->op == TOKEN_AMPER) { opcode = IR_OP_BIT_AND }
-        Pokud (uzel->op == TOKEN_PIPE) { opcode = IR_OP_BIT_OR }
-        Pokud (uzel->op == TOKEN_CARET) { opcode = IR_OP_BIT_XOR }
-        Pokud (uzel->op == TOKEN_SHL) { opcode = IR_OP_BIT_SHL }
-        Pokud (uzel->op == TOKEN_SHR) { opcode = IR_OP_BIT_SHR }
+        Pokud (uzel->op == 67) { opcode = 4 }
+        Pokud (uzel->op == 44) { opcode = 5 }
+        Pokud (uzel->op == 49) { opcode = 6 }
+        Pokud (uzel->op == 50) { opcode = 7 }
+        Pokud (uzel->op == 43) { opcode = 12 }
+        Pokud (uzel->op == 64) { opcode = 13 }
+        Pokud (uzel->op == 45) { opcode = 14 }
+        Pokud (uzel->op == 46) { opcode = 15 }
+        Pokud (uzel->op == 61) { opcode = 16 }
+        Pokud (uzel->op == 62) { opcode = 17 }
+        Pokud (uzel->op == 58) { opcode = 18 }
+        Pokud (uzel->op == 124) { opcode = 19 }
+        Pokud (uzel->op == 83) { opcode = 20 }
+        Pokud (uzel->op == 84) { opcode = 21 }
+        Pokud (uzel->op == 85) { opcode = 22 }
         
         Volej EmitujIR(opcode, vysledek_reg, l_reg, 0, r_reg, r_typ)
         Vrat vysledek_reg
     }
-    // ==========================================
-    // OPTIMALIZACE: Zrychlene volani funkci (FastCall)
-    // ==========================================
-    Pokud (uzel->type == 20) { // 20 je AST_CALL
-        Pokud (uzel->stmt_count <= 4) { // Optimalizujeme max 4 argumenty (Hardware limit)
+
+    Pokud (uzel->type == 20) { 
+        Pokud (uzel->stmt_count <= 4) { 
             Lokalni arg_regs = Volej malloc(uzel->stmt_count * 8)
             Lokalni i = 0
             Lokalni fallback = 0
             
-            // Vyhodnoceni argumentu ciste v registrech
             Dokud (i < uzel->stmt_count) {
                 Lokalni addr_call = uzel->stmts + (i * 8)
                 Lokalni arg_node : AST_Node = Volej CtiUkazatel(addr_call)
@@ -430,12 +894,12 @@ Metoda GenerujIR_Vyraz(uzel : AST_Node) {
                 i = 0
                 Dokud (i < uzel->stmt_count) {
                     Lokalni reg2 = Volej CtiUkazatel(arg_regs + (i * 8))
-                    Volej EmitujIR(23, i, reg2, 0, 0, 0) // 23 = IR_OP_PASS_ARG
+                    Volej EmitujIR(23, i, reg2, 0, 0, 0) 
                     i = i + 1
                 }
                 
                 Lokalni vysledek_reg = Volej NovyTempRegistr()
-                Volej EmitujIR(24, vysledek_reg, uzel->name, 0, uzel->stmt_count, 0) // 24 = IR_OP_CALL
+                Volej EmitujIR(24, vysledek_reg, uzel->name, 0, uzel->stmt_count, 0) 
                 
                 Volej free(arg_regs)
                 Vrat vysledek_reg
@@ -966,10 +1430,22 @@ Metoda LexerCore(nazev_souboru, is_main) {
         Lokalni aktualni_token : Token = pamet_tokenu + (pocet_tokenu * Velikost(Token))
         aktualni_token->line = radek
 
+       // --- CTENI CISEL (CELA I DESETINNA) ---
         Pokud (znak >= 48 && znak <= 57) {
             aktualni_token->type = TOKEN_NUMBER
             i = 0
-            Dokud (znak >= 48 && znak <= 57) {
+            Lokalni ma_tecku = 0
+            
+            // Cteme cislice nebo tecku (znak 46)
+            Dokud ((znak >= 48 && znak <= 57) || znak == 46) {
+                Pokud (znak == 46) {
+                    Pokud (ma_tecku == 1) {
+                        Volej printf("Lexikalni chyba na radku %d: Cislo ma vice nez jednu tecku!\n", radek)
+                        Volej exit(1)
+                    }
+                    ma_tecku = 1
+                    aktualni_token->type = TOKEN_FLOAT // Jakmile najdeme tecku, menime typ tokenu
+                }
                 Pokud (i < 254) { aktualni_token->value[i] = znak; i = i + 1 }
                 pos = pos + 1; znak = Volej CtiByt(zdroj_buffer + pos)
             }
@@ -1144,55 +1620,85 @@ Metoda OptimalizujUzel(binarni_uzel : AST_Node) {
         Lokalni l_uzel : AST_Node = binarni_uzel->left
         Lokalni r_uzel : AST_Node = binarni_uzel->right
         
-        Pokud (l_uzel->op == TOKEN_NUMBER && r_uzel->op == TOKEN_NUMBER) {
+        // --- BOOLEOVSKE IDENTITY S PROMENNYMI (x == x) ---
+        Pokud (l_uzel->op == 35 && r_uzel->op == 35) { // 35 = TOKEN_IDENTIFIER
+            Pokud (Volej strcmp(l_uzel->name, r_uzel->name) == 0) {
+                Pokud (binarni_uzel->op == 43 || binarni_uzel->op == 61 || binarni_uzel->op == 62) { // EQEQ, LESSEQ, GREATEREQ
+                    binarni_uzel->op = 34; Volej strncpy(binarni_uzel->name, "1", 2); binarni_uzel->left = 0; binarni_uzel->right = 0; Vrat binarni_uzel
+                }
+                Pokud (binarni_uzel->op == 64 || binarni_uzel->op == 45 || binarni_uzel->op == 46) { // NEQ, LESS, GREATER
+                    binarni_uzel->op = 34; Volej strncpy(binarni_uzel->name, "0", 2); binarni_uzel->left = 0; binarni_uzel->right = 0; Vrat binarni_uzel
+                }
+            }
+        }
+        
+        // --- ZCELA KONSTANTNI VYRAZ (Slozeni 2 cisel) ---
+        Pokud (l_uzel->op == 34 && r_uzel->op == 34) { // 34 = TOKEN_NUMBER
             Lokalni l_val = Volej atoi(l_uzel->name)
             Lokalni r_val = Volej atoi(r_uzel->name)
             Lokalni vys = 0
             Lokalni lze_opt = 1
             
-            Pokud (binarni_uzel->op == TOKEN_PLUS) { vys = l_val + r_val }
-            Jinak Pokud (binarni_uzel->op == TOKEN_MINUS) { vys = l_val - r_val }
-            Jinak Pokud (binarni_uzel->op == TOKEN_MUL) { vys = l_val * r_val }
-            Jinak Pokud (binarni_uzel->op == TOKEN_DIV) {
-                Pokud (r_val != 0) { vys = l_val / r_val } Jinak { lze_opt = 0 }
-            }
-            Jinak Pokud (binarni_uzel->op == TOKEN_MOD) {
-                Pokud (r_val != 0) { vys = l_val - ((l_val / r_val) * r_val) } Jinak { lze_opt = 0 }
-            }
-            Jinak Pokud (binarni_uzel->op == TOKEN_EQEQ) { Pokud (l_val == r_val) { vys = 1 } Jinak { vys = 0 } }
-            Jinak Pokud (binarni_uzel->op == TOKEN_NEQ) { Pokud (l_val != r_val) { vys = 1 } Jinak { vys = 0 } }
-            Jinak Pokud (binarni_uzel->op == TOKEN_LESS) { Pokud (l_val < r_val) { vys = 1 } Jinak { vys = 0 } }
-            Jinak Pokud (binarni_uzel->op == TOKEN_GREATER) { Pokud (l_val > r_val) { vys = 1 } Jinak { vys = 0 } }
-            Jinak Pokud (binarni_uzel->op == TOKEN_LESSEQ) { Pokud (l_val <= r_val) { vys = 1 } Jinak { vys = 0 } }
-            Jinak Pokud (binarni_uzel->op == TOKEN_GREATEREQ) { Pokud (l_val >= r_val) { vys = 1 } Jinak { vys = 0 } }
-            Jinak Pokud (binarni_uzel->op == TOKEN_SHL) {
-                Lokalni mocnina_l = 1
-                Lokalni p_l = 0
-                Dokud (p_l < r_val) { mocnina_l = mocnina_l * 2; p_l = p_l + 1 }
-                vys = l_val * mocnina_l
-            }
-            Jinak Pokud (binarni_uzel->op == TOKEN_SHR) {
-                Lokalni mocnina_p = 1
-                Lokalni p_p = 0
-                Dokud (p_p < r_val) { mocnina_p = mocnina_p * 2; p_p = p_p + 1 }
-                vys = l_val / mocnina_p
-            }
+            Pokud (binarni_uzel->op == 67) { vys = l_val + r_val } // PLUS
+            Jinak Pokud (binarni_uzel->op == 44) { vys = l_val - r_val } // MINUS
+            Jinak Pokud (binarni_uzel->op == 49) { vys = l_val * r_val } // MUL
+            Jinak Pokud (binarni_uzel->op == 50) { Pokud (r_val != 0) { vys = l_val / r_val } Jinak { lze_opt = 0 } }
+            Jinak Pokud (binarni_uzel->op == 43) { Pokud (l_val == r_val) { vys = 1 } Jinak { vys = 0 } }
+            Jinak Pokud (binarni_uzel->op == 64) { Pokud (l_val != r_val) { vys = 1 } Jinak { vys = 0 } }
+            Jinak Pokud (binarni_uzel->op == 47) { Pokud (l_val != 0 && r_val != 0) { vys = 1 } Jinak { vys = 0 } } // AND
+            Jinak Pokud (binarni_uzel->op == 48) { Pokud (l_val != 0 || r_val != 0) { vys = 1 } Jinak { vys = 0 } } // OR
             Jinak { lze_opt = 0 }
-            // Pozn.: & | ^ vedome neskladame v teto fazi (behem bootstrapu by tu
-            // museli byt jiz podporovany operatory pro implementaci skladani,
-            // a spravnost za behu zajistuji primo instrukce AND/OR/XOR v generatoru).
             
             Pokud (lze_opt == 1) {
-                binarni_uzel->op = TOKEN_NUMBER
+                binarni_uzel->op = 34
                 Volej sprintf(binarni_uzel->name, "%d", vys)
                 binarni_uzel->left = 0
                 binarni_uzel->right = 0
             }
+            Vrat binarni_uzel
+        }
+        
+        // --- ALGEBRAICKE ZJEDNODUSENI (prava strana je cislo) ---
+        Pokud (r_uzel->op == 34) { 
+            Lokalni r_cislo = Volej atoi(r_uzel->name)
+            
+            // Nasobeni, scitani
+            Pokud (binarni_uzel->op == 49 && r_cislo == 0) { binarni_uzel->op = 34; Volej strncpy(binarni_uzel->name, "0", 2); binarni_uzel->left = 0; binarni_uzel->right = 0; Vrat binarni_uzel }
+            Jinak Pokud (binarni_uzel->op == 49 && r_cislo == 1) { Vrat l_uzel }
+            Jinak Pokud (binarni_uzel->op == 67 && r_cislo == 0) { Vrat l_uzel }
+            Jinak Pokud (binarni_uzel->op == 44 && r_cislo == 0) { Vrat l_uzel }
+            Jinak Pokud (binarni_uzel->op == 50 && r_cislo == 1) { Vrat l_uzel }
+            
+            // Logika (AND, OR)
+            Jinak Pokud (binarni_uzel->op == 47 && r_cislo == 1) { Vrat l_uzel } // x && 1 = x
+            Jinak Pokud (binarni_uzel->op == 47 && r_cislo == 0) { binarni_uzel->op = 34; Volej strncpy(binarni_uzel->name, "0", 2); binarni_uzel->left = 0; binarni_uzel->right = 0; Vrat binarni_uzel }
+            Jinak Pokud (binarni_uzel->op == 48 && r_cislo == 0) { Vrat l_uzel } // x || 0 = x
+            Jinak Pokud (binarni_uzel->op == 48 && r_cislo == 1) { binarni_uzel->op = 34; Volej strncpy(binarni_uzel->name, "1", 2); binarni_uzel->left = 0; binarni_uzel->right = 0; Vrat binarni_uzel }
+            
+            // Strength Reduction (Bitove posuny)
+            Pokud (binarni_uzel->op == 49) {
+                Pokud (r_cislo == 2) { binarni_uzel->op = 84; Volej strncpy(r_uzel->name, "1", 2); Vrat binarni_uzel }
+                Pokud (r_cislo == 4) { binarni_uzel->op = 84; Volej strncpy(r_uzel->name, "2", 2); Vrat binarni_uzel }
+                Pokud (r_cislo == 8) { binarni_uzel->op = 84; Volej strncpy(r_uzel->name, "3", 2); Vrat binarni_uzel }
+            }
+            Pokud (binarni_uzel->op == 50) {
+                Pokud (r_cislo == 2) { binarni_uzel->op = 85; Volej strncpy(r_uzel->name, "1", 2); Vrat binarni_uzel }
+                Pokud (r_cislo == 4) { binarni_uzel->op = 85; Volej strncpy(r_uzel->name, "2", 2); Vrat binarni_uzel }
+                Pokud (r_cislo == 8) { binarni_uzel->op = 85; Volej strncpy(r_uzel->name, "3", 2); Vrat binarni_uzel }
+            }
+        }
+        
+        // --- ALGEBRAICKE ZJEDNODUSENI (leva strana je cislo) ---
+        Pokud (l_uzel->op == 34) { 
+            Lokalni l_cislo = Volej atoi(l_uzel->name)
+            Pokud (binarni_uzel->op == 47 && l_cislo == 1) { Vrat r_uzel }
+            Pokud (binarni_uzel->op == 47 && l_cislo == 0) { binarni_uzel->op = 34; Volej strncpy(binarni_uzel->name, "0", 2); binarni_uzel->left = 0; binarni_uzel->right = 0; Vrat binarni_uzel }
+            Pokud (binarni_uzel->op == 48 && l_cislo == 0) { Vrat r_uzel }
+            Pokud (binarni_uzel->op == 48 && l_cislo == 1) { binarni_uzel->op = 34; Volej strncpy(binarni_uzel->name, "1", 2); binarni_uzel->left = 0; binarni_uzel->right = 0; Vrat binarni_uzel }
         }
     }
     Vrat binarni_uzel
 }
-
 Metoda ParseFaktor() {
     Lokalni token : Token = Volej ZiskejToken(aktualni_token_idx)
     Lokalni uzel : AST_Node = 0
@@ -1221,6 +1727,13 @@ Metoda ParseFaktor() {
         uzel = Volej VytvorUzel(AST_EXPR, token->line)
         uzel->op = TOKEN_NUMBER
         Volej strncpy(uzel->name, token->value, 255)
+        aktualni_token_idx = aktualni_token_idx + 1
+    } Jinak Pokud (token->type == 98) { // --- NOVE: Zpracovani TOKEN_FLOAT (98) ---
+        uzel = Volej VytvorUzel(AST_EXPR, token->line)
+        uzel->op = 98 
+        Volej strncpy(uzel->name, token->value, 255) // Ulozime si tvar "3.14"
+        uzel->int_val = globalni_float_id            // Ulozime si ID (flt0, flt1...)
+        globalni_float_id = globalni_float_id + 1
         aktualni_token_idx = aktualni_token_idx + 1
     } Jinak Pokud (token->type == TOKEN_VELIKOST) {
         uzel = Volej VytvorUzel(AST_EXPR, token->line)
@@ -1297,14 +1810,22 @@ Metoda ParseFaktor() {
             aktualni_token_idx = aktualni_token_idx + 2
             uzel->left = Volej ParseVyraz()
             
-            // OPRAVA: Přejmenování proměnné na po_idx2
             Lokalni po_idx2 : Token = Volej ZiskejToken(aktualni_token_idx)
             Pokud (po_idx2->type == TOKEN_RBRACKET) { aktualni_token_idx = aktualni_token_idx + 1 }
         } Jinak {
-            uzel = Volej VytvorUzel(AST_EXPR, token->line)
-            uzel->op = TOKEN_IDENTIFIER
-            Volej strncpy(uzel->name, token->value, 255)
-            aktualni_token_idx = aktualni_token_idx + 1
+            // --- OPTIMALIZACE: Constant Propagation (Sireni konstant) ---
+            Lokalni sym_id_opt : Symbol = Volej NajdiSymbol(token->value)
+            Pokud (sym_id_opt != 0 && sym_id_opt->is_const == 1) {
+                uzel = Volej VytvorUzel(AST_EXPR, token->line)
+                uzel->op = TOKEN_NUMBER
+                Volej sprintf(uzel->name, "%d", sym_id_opt->const_val)
+                aktualni_token_idx = aktualni_token_idx + 1
+            } Jinak {
+                uzel = Volej VytvorUzel(AST_EXPR, token->line)
+                uzel->op = TOKEN_IDENTIFIER
+                Volej strncpy(uzel->name, token->value, 255)
+                aktualni_token_idx = aktualni_token_idx + 1
+            }
         }
     } Jinak { Volej printf("Chyba: Ocekavan vyraz!\n"); Volej exit(1) }
 
@@ -1451,13 +1972,22 @@ Metoda ParseVyraz() {
 }
 Metoda ZiskejTypUzlu(u : AST_Node) {
     Pokud (u == 0) { Vrat "" }
-    Pokud (u->op == 33 || u->op == 95) { Vrat "String" } // 33=STRING, 95=STRING_PLUS
-    Pokud (u->op == 34 || u->op == 67 || u->op == 44 || u->op == 49 || u->op == 50) { Vrat "Cislo" }
-    Pokud (u->op == 35) { // 35=IDENTIFIER
+    Pokud (u->op == 33 || u->op == 95) { Vrat "String" }
+    Pokud (u->op == 98) { Vrat "Float" }
+    
+    // Pro matematicke operatory odvodime typ z leve/prave strany
+    Pokud (u->op == 34 || u->op == 67 || u->op == 44 || u->op == 49 || u->op == 50 || u->op == 80) { 
+        Lokalni lt = Volej ZiskejTypUzlu(u->left)
+        Lokalni rt = Volej ZiskejTypUzlu(u->right)
+        Pokud (Volej strcmp(lt, "Float") == 0 || Volej strcmp(rt, "Float") == 0) { Vrat "Float" }
+        Pokud (Volej strcmp(lt, "String") == 0 || Volej strcmp(rt, "String") == 0) { Vrat "String" }
+        Vrat "Cislo"
+    }
+    Pokud (u->op == 35) { // IDENTIFIER
         Lokalni sym : Symbol = Volej NajdiSymbol(u->name)
         Pokud (sym != 0) { Vrat sym->type_name }
     }
-    Pokud (u->type == 20) { // 20=AST_CALL
+    Pokud (u->type == 20) { // AST_CALL
         Lokalni fsym : Symbol = Volej NajdiSymbol(u->name)
         Pokud (fsym != 0 && fsym->is_function == 1) {
             Lokalni fnode : AST_Node = fsym->func_node
@@ -1644,40 +2174,27 @@ Metoda ParseBlok() {
     aktualni_hloubka_bloku = aktualni_hloubka_bloku - 1
     Vrat blok
 }
-
 Metoda ParsePrikaz() {
     Lokalni token : Token = Volej ZiskejToken(aktualni_token_idx)
     Lokalni uzel : AST_Node = 0
     Lokalni str_token : Token = 0
 
-    Pokud (token->type == TOKEN_ASM) {
-        uzel = Volej VytvorUzel(AST_ASM_NODE, token->line)
+    Pokud (token->type == 23) { // TOKEN_ASM
+        uzel = Volej VytvorUzel(26, token->line)
         aktualni_token_idx = aktualni_token_idx + 1
-        
         str_token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (str_token->type == TOKEN_STRING) {
-            Volej strncpy(uzel->name, str_token->value, 255)
-        } Jinak {
-            Volej strncpy(uzel->name, "nop", 255)
-        }
-        
+        Pokud (str_token->type == 33) { Volej strncpy(uzel->name, str_token->value, 255) } Jinak { Volej strncpy(uzel->name, "nop", 255) }
         aktualni_token_idx = aktualni_token_idx + 1
         Vrat uzel
     }
     
-    Pokud (token->type == TOKEN_VRAT) { uzel = Volej VytvorUzel(AST_RETURN, token->line); aktualni_token_idx = aktualni_token_idx + 1; uzel->left = Volej ParseVyraz(); Vrat uzel }
-    Pokud (token->type == TOKEN_UKONCI) { uzel = Volej VytvorUzel(AST_BREAK, token->line); aktualni_token_idx = aktualni_token_idx + 1; Vrat uzel }
-    Pokud (token->type == TOKEN_POKRACUJ) { uzel = Volej VytvorUzel(AST_CONTINUE, token->line); aktualni_token_idx = aktualni_token_idx + 1; Vrat uzel }
+    Pokud (token->type == 66) { uzel = Volej VytvorUzel(11, token->line); aktualni_token_idx = aktualni_token_idx + 1; uzel->left = Volej ParseVyraz(); Vrat uzel }
+    Pokud (token->type == 54) { uzel = Volej VytvorUzel(22, token->line); aktualni_token_idx = aktualni_token_idx + 1; Vrat uzel }
+    Pokud (token->type == 56) { uzel = Volej VytvorUzel(23, token->line); aktualni_token_idx = aktualni_token_idx + 1; Vrat uzel }
+    Pokud (token->type == 92) { uzel = Volej VytvorUzel(31, token->line); aktualni_token_idx = aktualni_token_idx + 1; uzel->left = Volej ParseVyraz(); Vrat uzel }
 
-    Pokud (token->type == TOKEN_UVOLNI) {
-        uzel = Volej VytvorUzel(AST_FREE, token->line)
-        aktualni_token_idx = aktualni_token_idx + 1
-        uzel->left = Volej ParseVyraz()
-        Vrat uzel
-    }
-
-    Pokud (token->type == TOKEN_LOKALNI) {
-        uzel = Volej VytvorUzel(AST_VAR_DECL, token->line)
+    Pokud (token->type == 15) { // TOKEN_LOKALNI
+        uzel = Volej VytvorUzel(3, token->line)
         aktualni_token_idx = aktualni_token_idx + 1
         Lokalni nazev_token : Token = Volej ZiskejToken(aktualni_token_idx)
         Volej strncpy(uzel->name, nazev_token->value, 255)
@@ -1685,7 +2202,7 @@ Metoda ParsePrikaz() {
 
         Lokalni velikost_bajtu = 8
         Lokalni token_zavor : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (token_zavor->type == TOKEN_LBRACKET) {
+        Pokud (token_zavor->type == 38) { // LBRACKET
             aktualni_token_idx = aktualni_token_idx + 1
             Lokalni cislo_tok : Token = Volej ZiskejToken(aktualni_token_idx)
             velikost_bajtu = Volej atoi(cislo_tok->value) * 8
@@ -1694,7 +2211,7 @@ Metoda ParsePrikaz() {
 
         Lokalni dvojtecka : Token = Volej ZiskejToken(aktualni_token_idx)
         Lokalni typ_promenne = ""
-        Pokud (dvojtecka->type == TOKEN_COLON) {
+        Pokud (dvojtecka->type == 57) { // COLON (OPRAVENO Z 58 NA 57)
             aktualni_token_idx = aktualni_token_idx + 1
             Lokalni typ_token : Token = Volej ZiskejToken(aktualni_token_idx)
             typ_promenne = typ_token->value
@@ -1702,7 +2219,7 @@ Metoda ParsePrikaz() {
         }
 
         Lokalni eq_token : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (eq_token->type == TOKEN_EQ) {
+        Pokud (eq_token->type == 42) { // EQ
             aktualni_token_idx = aktualni_token_idx + 1
             uzel->right = Volej ParseVyraz()
         } Jinak {
@@ -1712,118 +2229,125 @@ Metoda ParsePrikaz() {
         Volej PridejLokalniSymbol(uzel->name, velikost_bajtu)
         
         Lokalni sym : Symbol = Volej NajdiSymbol(uzel->name)
-        Pokud (sym != 0 && Volej strcmp(typ_promenne, "") != 0) { Volej strncpy(sym->type_name, typ_promenne, 63) }
+        Pokud (sym != 0) {
+            Pokud (Volej strcmp(typ_promenne, "") != 0) { 
+                Volej strncpy(sym->type_name, typ_promenne, 63) 
+            } Jinak Pokud (uzel->right != 0) {
+                // --- OPRAVA: Okamzita typova inference pri parsovani! ---
+                Lokalni odvozeny = Volej ZiskejTypUzlu(uzel->right)
+                Pokud (Volej strcmp(odvozeny, "") != 0) {
+                    Volej strncpy(sym->type_name, odvozeny, 63)
+                }
+            }
+        }
         Vrat uzel
     }
     
-    Pokud (token->type == TOKEN_VYPIS) { uzel = Volej VytvorUzel(AST_PRINT, token->line); aktualni_token_idx = aktualni_token_idx + 1; uzel->left = Volej ParseVyraz(); Vrat uzel }
+    Pokud (token->type == 19) { uzel = Volej VytvorUzel(25, token->line); aktualni_token_idx = aktualni_token_idx + 1; uzel->left = Volej ParseVyraz(); Vrat uzel }
 
-    Pokud (token->type == TOKEN_IDENTIFIER) {
+    Pokud (token->type == 35) { // IDENTIFIER
         Lokalni dalsi_token : Token = Volej ZiskejToken(aktualni_token_idx + 1)
-        Pokud (dalsi_token->type == TOKEN_EQ || dalsi_token->type == TOKEN_PLUSEQ || dalsi_token->type == TOKEN_MINUSEQ) {
-            uzel = Volej VytvorUzel(AST_ASSIGN, token->line)
+        Pokud (dalsi_token->type == 42 || dalsi_token->type == 69 || dalsi_token->type == 70) {
+            uzel = Volej VytvorUzel(4, token->line)
             uzel->op = dalsi_token->type
             Volej strncpy(uzel->name, token->value, 255)
             aktualni_token_idx = aktualni_token_idx + 2
             uzel->right = Volej ParseVyraz()
+            
+            // --- OPRAVA: Typova inference i pri prirazovani, pokud jeste nema typ ---
+            Lokalni sym_as : Symbol = Volej NajdiSymbol(uzel->name)
+            Pokud (sym_as != 0 && Volej strcmp(sym_as->type_name, "") == 0) {
+                Lokalni odvozeny2 = Volej ZiskejTypUzlu(uzel->right)
+                Pokud (Volej strcmp(odvozeny2, "") != 0) {
+                    Volej strncpy(sym_as->type_name, odvozeny2, 63)
+                }
+            }
             Vrat uzel
-        } Jinak Pokud (dalsi_token->type == TOKEN_ARROW) {
+        } Jinak Pokud (dalsi_token->type == 63) { // ARROW
             Lokalni vlastnost : Token = Volej ZiskejToken(aktualni_token_idx + 2)
             Lokalni treti_token : Token = Volej ZiskejToken(aktualni_token_idx + 3)
             
-            Pokud (treti_token->type == TOKEN_EQ) {
-                uzel = Volej VytvorUzel(AST_PTR_MEMBER_ASSIGN, token->line)
+            Pokud (treti_token->type == 42) { // EQ
+                uzel = Volej VytvorUzel(17, token->line)
                 Volej strncpy(uzel->name, token->value, 255)
                 Lokalni sym2 : Symbol = Volej NajdiSymbol(token->value)
                 Pokud (sym2 != 0) { uzel->int_val = Volej ZiskejOffset(sym2->type_name, vlastnost->value) }
                 aktualni_token_idx = aktualni_token_idx + 4
                 uzel->right = Volej ParseVyraz()
                 Vrat uzel
-            } Jinak Pokud (treti_token->type == TOKEN_LBRACKET) {
-                uzel = Volej VytvorUzel(AST_ARRAY_ASSIGN, token->line)
+            } Jinak Pokud (treti_token->type == 38) { // LBRACKET
+                uzel = Volej VytvorUzel(19, token->line)
                 Volej strncpy(uzel->name, token->value, 255)
                 Volej strncpy(uzel->sub_name, vlastnost->value, 63)
                 Lokalni sym_arr : Symbol = Volej NajdiSymbol(token->value)
                 Pokud (sym_arr != 0) { uzel->int_val = Volej ZiskejOffset(sym_arr->type_name, vlastnost->value) }
-                
                 aktualni_token_idx = aktualni_token_idx + 4
                 uzel->left = Volej ParseVyraz()
-                
                 Lokalni po_idx : Token = Volej ZiskejToken(aktualni_token_idx)
-                Pokud (po_idx->type == TOKEN_RBRACKET) { aktualni_token_idx = aktualni_token_idx + 1 }
+                Pokud (po_idx->type == 39) { aktualni_token_idx = aktualni_token_idx + 1 }
                 Lokalni r_eq : Token = Volej ZiskejToken(aktualni_token_idx)
-                Pokud (r_eq->type == TOKEN_EQ) { aktualni_token_idx = aktualni_token_idx + 1 }
-                
+                Pokud (r_eq->type == 42) { aktualni_token_idx = aktualni_token_idx + 1 }
                 uzel->right = Volej ParseVyraz()
                 Vrat uzel
             }
-        } Jinak Pokud (dalsi_token->type == TOKEN_LBRACKET) {
-            uzel = Volej VytvorUzel(AST_LOCAL_ARRAY_ASSIGN, token->line)
+        } Jinak Pokud (dalsi_token->type == 38) { // LBRACKET
+            uzel = Volej VytvorUzel(33, token->line)
             Volej strncpy(uzel->name, token->value, 255)
             aktualni_token_idx = aktualni_token_idx + 2
             uzel->left = Volej ParseVyraz()
-            
-            // OPRAVA: Přejmenování proměnných
             Lokalni po_idx2 : Token = Volej ZiskejToken(aktualni_token_idx)
-            Pokud (po_idx2->type == TOKEN_RBRACKET) { aktualni_token_idx = aktualni_token_idx + 1 }
+            Pokud (po_idx2->type == 39) { aktualni_token_idx = aktualni_token_idx + 1 }
             Lokalni r_eq2 : Token = Volej ZiskejToken(aktualni_token_idx)
-            Pokud (r_eq2->type == TOKEN_EQ) { aktualni_token_idx = aktualni_token_idx + 1 }
-            
+            Pokud (r_eq2->type == 42) { aktualni_token_idx = aktualni_token_idx + 1 }
             uzel->right = Volej ParseVyraz()
             Vrat uzel
         }
     }
 
-    Pokud (token->type == TOKEN_POKUD) {
-        uzel = Volej VytvorUzel(AST_IF, token->line)
+    Pokud (token->type == 21) { // POKUD
+        uzel = Volej VytvorUzel(6, token->line)
         aktualni_token_idx = aktualni_token_idx + 2
         uzel->left = Volej ParseVyraz()
         aktualni_token_idx = aktualni_token_idx + 1
         Lokalni pb_token : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (pb_token->type == TOKEN_LBRACE) { uzel->right = Volej ParseBlok() }
-        Jinak { uzel->right = Volej ParsePrikaz() }
+        Pokud (pb_token->type == 36) { uzel->right = Volej ParseBlok() } Jinak { uzel->right = Volej ParsePrikaz() }
         Lokalni jinak_token : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (jinak_token->type == TOKEN_JINAK) {
+        Pokud (jinak_token->type == 22) { // JINAK
             aktualni_token_idx = aktualni_token_idx + 1
             Lokalni eb_token : Token = Volej ZiskejToken(aktualni_token_idx)
-            Pokud (eb_token->type == TOKEN_LBRACE) { uzel->alt = Volej ParseBlok() }
-            Jinak { uzel->alt = Volej ParsePrikaz() }
+            Pokud (eb_token->type == 36) { uzel->alt = Volej ParseBlok() } Jinak { uzel->alt = Volej ParsePrikaz() }
         }
         Vrat uzel
     }
     
-    Pokud (token->type == TOKEN_DOKUD) {
-        uzel = Volej VytvorUzel(AST_WHILE, token->line)
+    Pokud (token->type == 7) { // DOKUD
+        uzel = Volej VytvorUzel(7, token->line)
         aktualni_token_idx = aktualni_token_idx + 2
         uzel->left = Volej ParseVyraz()
         aktualni_token_idx = aktualni_token_idx + 1
         Lokalni db_token : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (db_token->type == TOKEN_LBRACE) { uzel->right = Volej ParseBlok() }
-        Jinak { uzel->right = Volej ParsePrikaz() }
+        Pokud (db_token->type == 36) { uzel->right = Volej ParseBlok() } Jinak { uzel->right = Volej ParsePrikaz() }
+        
+        // PŘIDÁNO: Volání modulu pro O(1) optimalizaci cyklů
+        Volej OptimalizujSCEV(uzel)
+        
         Vrat uzel
     }
 
-    Pokud (token->type == TOKEN_OPAKUJ) {
-        uzel = Volej VytvorUzel(AST_FOR, token->line)
+    Pokud (token->type == 8) { // OPAKUJ
+        uzel = Volej VytvorUzel(8, token->line)
         aktualni_token_idx = aktualni_token_idx + 2
-        
         uzel->left = Volej ParsePrikaz()
-        
         Lokalni carka1 : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (carka1->type == TOKEN_COMMA) { aktualni_token_idx = aktualni_token_idx + 1 }
-        
+        Pokud (carka1->type == 51) { aktualni_token_idx = aktualni_token_idx + 1 }
         uzel->right = Volej ParseVyraz()
-        
         Lokalni carka2 : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (carka2->type == TOKEN_COMMA) { aktualni_token_idx = aktualni_token_idx + 1 }
-        
+        Pokud (carka2->type == 51) { aktualni_token_idx = aktualni_token_idx + 1 }
         uzel->alt = Volej ParsePrikaz()
-        
         Lokalni rp_token : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (rp_token->type == TOKEN_RPAREN) { aktualni_token_idx = aktualni_token_idx + 1 }
-        
+        Pokud (rp_token->type == 41) { aktualni_token_idx = aktualni_token_idx + 1 }
         Lokalni blok_token : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (blok_token->type == TOKEN_LBRACE) {
+        Pokud (blok_token->type == 36) {
             Lokalni telo1 = Volej ParseBlok()
             uzel->stmts = Volej calloc(1, 8)
             Volej ZapisUkazatel(uzel->stmts, telo1)
@@ -1832,85 +2356,70 @@ Metoda ParsePrikaz() {
             uzel->stmts = Volej calloc(1, 8)
             Volej ZapisUkazatel(uzel->stmts, telo2)
         }
+        
+        // --- ZDE PŘIDEJ TENTO ŘÁDEK ---
+        Volej OptimalizujRozbaleniOpakuj(uzel)
+        // ------------------------------
+
         Vrat uzel
     }
 
-    Pokud (token->type == TOKEN_ROZCESTNIK) {
-        uzel = Volej VytvorUzel(AST_SWITCH, token->line)
+    Pokud (token->type == 71) { // ROZCESTNIK
+        uzel = Volej VytvorUzel(28, token->line)
         aktualni_token_idx = aktualni_token_idx + 2
         uzel->left = Volej ParseVyraz()
-        
         Lokalni rp : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (rp->type == TOKEN_RPAREN) { aktualni_token_idx = aktualni_token_idx + 1 }
-        
+        Pokud (rp->type == 41) { aktualni_token_idx = aktualni_token_idx + 1 }
         Lokalni lb : Token = Volej ZiskejToken(aktualni_token_idx)
-        Pokud (lb->type == TOKEN_LBRACE) { aktualni_token_idx = aktualni_token_idx + 1 }
-
+        Pokud (lb->type == 36) { aktualni_token_idx = aktualni_token_idx + 1 }
         uzel->stmts = Volej calloc(500, 8)
         uzel->stmt_count = 0
-
         Lokalni t : Token = Volej ZiskejToken(aktualni_token_idx)
-        Dokud (t->type != TOKEN_RBRACE && t->type != TOKEN_EOF) {
-            Pokud (t->type == TOKEN_CESTA) {
-                Lokalni c_uzel : AST_Node = Volej VytvorUzel(AST_CASE, t->line)
+        Dokud (t->type != 37 && t->type != 55) { // RBRACE / EOF
+            Pokud (t->type == 72) { // CESTA
+                Lokalni c_uzel : AST_Node = Volej VytvorUzel(29, t->line)
                 aktualni_token_idx = aktualni_token_idx + 1
                 c_uzel->left = Volej ParseVyraz()
-                
                 Lokalni col : Token = Volej ZiskejToken(aktualni_token_idx)
-                Pokud (col->type == TOKEN_COLON) { aktualni_token_idx = aktualni_token_idx + 1 }
-                
+                Pokud (col->type == 57) { aktualni_token_idx = aktualni_token_idx + 1 } // OPRAVENO Z 58 NA 57
                 Lokalni akce_token : Token = Volej ZiskejToken(aktualni_token_idx)
-                Pokud (akce_token->type == TOKEN_LBRACE) { c_uzel->right = Volej ParseBlok() }
-                Jinak { c_uzel->right = Volej ParsePrikaz() }
-                
+                Pokud (akce_token->type == 36) { c_uzel->right = Volej ParseBlok() } Jinak { c_uzel->right = Volej ParsePrikaz() }
                 Pokud (uzel->stmt_count < 495) {
                     Lokalni adr = uzel->stmts + (uzel->stmt_count * 8)
                     Volej ZapisUkazatel(adr, c_uzel)
                     uzel->stmt_count = uzel->stmt_count + 1
-                } Jinak {
-                    Volej printf("Kriticka chyba: prekrocen maximalni pocet vetvi Rozcestniku (495) na radku %d!\n", t->line)
-                    Volej exit(1)
-                }
-            } Jinak Pokud (t->type == TOKEN_HLAVNI_CESTA) {
+                } Jinak { Volej printf("Kriticka chyba\n"); Volej exit(1) }
+            } Jinak Pokud (t->type == 73) { // HLAVNI_CESTA
                 aktualni_token_idx = aktualni_token_idx + 1
                 Lokalni col2 : Token = Volej ZiskejToken(aktualni_token_idx)
-                Pokud (col2->type == TOKEN_COLON) { aktualni_token_idx = aktualni_token_idx + 1 }
-                
+                Pokud (col2->type == 57) { aktualni_token_idx = aktualni_token_idx + 1 } // OPRAVENO Z 58 NA 57
                 Lokalni akce_token2 : Token = Volej ZiskejToken(aktualni_token_idx)
-                Pokud (akce_token2->type == TOKEN_LBRACE) { uzel->alt = Volej ParseBlok() }
-                Jinak { uzel->alt = Volej ParsePrikaz() }
-            } Jinak {
-                aktualni_token_idx = aktualni_token_idx + 1
-            }
+                Pokud (akce_token2->type == 36) { uzel->alt = Volej ParseBlok() } Jinak { uzel->alt = Volej ParsePrikaz() }
+            } Jinak { aktualni_token_idx = aktualni_token_idx + 1 }
             t = Volej ZiskejToken(aktualni_token_idx)
         }
         aktualni_token_idx = aktualni_token_idx + 1
         Vrat uzel
     }
 
-    Pokud (token->type == TOKEN_VOLEJ) {
-        uzel = Volej VytvorUzel(AST_CALL, token->line)
+    Pokud (token->type == 5) { // VOLEJ
+        uzel = Volej VytvorUzel(20, token->line)
         aktualni_token_idx = aktualni_token_idx + 1
         Lokalni nazev_token_volej : Token = Volej ZiskejToken(aktualni_token_idx)
         Volej strncpy(uzel->name, nazev_token_volej->value, 255)
         aktualni_token_idx = aktualni_token_idx + 2
-
         uzel->stmts = Volej calloc(100, 8)
         uzel->stmt_count = 0
         Lokalni arg_token : Token = Volej ZiskejToken(aktualni_token_idx)
-        Dokud (arg_token->type != TOKEN_RPAREN && arg_token->type != TOKEN_EOF) {
+        Dokud (arg_token->type != 41 && arg_token->type != 55) {
             Lokalni arg_vyraz = Volej ParseVyraz()
             Pokud (uzel->stmt_count < 95) {
                 Lokalni addr_arg = uzel->stmts + (uzel->stmt_count * 8)
                 Volej ZapisUkazatel(addr_arg, arg_vyraz)
                 uzel->stmt_count = uzel->stmt_count + 1
-            } Jinak {
-                Volej printf("Kriticka chyba: prekrocen maximalni pocet argumentu volani (95) na radku %d!\n", token->line)
-                Volej exit(1)
-            }
-            
+            } Jinak { Volej printf("Kriticka chyba\n"); Volej exit(1) }
             arg_token = Volej ZiskejToken(aktualni_token_idx)
-            Pokud (arg_token->type == TOKEN_COMMA) { aktualni_token_idx = aktualni_token_idx + 1 }
+            Pokud (arg_token->type == 51) { aktualni_token_idx = aktualni_token_idx + 1 }
             arg_token = Volej ZiskejToken(aktualni_token_idx)
         }
         aktualni_token_idx = aktualni_token_idx + 1
@@ -2138,25 +2647,23 @@ Metoda GenerujVyraz(out, uzel : AST_Node) {
     Pokud (uzel == 0) Vrat 0
     Pokud (uzel->type == 100) Vrat 0
 
-    // ==============================================================
-    // HYBRIDNI KOMPILACE: Pokus o super-rychly preklad pres registry
-    // ==============================================================
     pocet_ir = 0
     pocet_intervalu = 0
     citac_temp_reg = 1
     
     Lokalni ir_vysledek = Volej GenerujIR_Vyraz(uzel)
     Pokud (ir_vysledek != 0) {
-        // Skvele! Vyraz se cely zpracoval v nove pameti, muzeme uvolnit draka:
+        Lokalni vys_int : LiveInterval = pamet_intervalu + ((ir_vysledek - 1) * Velikost(LiveInterval))
+        vys_int->end_instr = pocet_ir
+
         Volej ProvedLinearScan()
         Volej OptimalizujMrtvyKod()
         Volej PrelozIRDoASM(out, ir_vysledek)
-        Vrat 0 // Hotovo, nepokracujeme do stareho generatoru!
+        Vrat 0 
     }
-    // ==============================================================
-    // Pokud se sem dostaneme, vyraz byl moc slozity a zpracuje se
-    // klasickym spolehlivym AST (funkce, retezce, pole, globaly)
-    // ==============================================================
+
+    // Nacteni desetinneho cisla
+    Pokud (uzel->op == 98) { Volej fprintf(out, "    mov rax, qword [rel flt%d]\n", uzel->int_val); Vrat 0 }
 
     Pokud (uzel->op == TOKEN_STRING) { Volej fprintf(out, "    lea rax, [rel str%d]\n", uzel->int_val); Vrat 0 }
     Pokud (uzel->op == TOKEN_NUMBER) { Volej fprintf(out, "    mov rax, %s\n", uzel->name); Vrat 0 }
@@ -2196,23 +2703,21 @@ Metoda GenerujVyraz(out, uzel : AST_Node) {
         }
         
         Pokud (cilova_platforma == CIL_WINDOWS) {
-            Pokud (uzel->stmt_count > 0) { Volej fputs("    pop rcx\n", out) }
-            Pokud (uzel->stmt_count > 1) { Volej fputs("    pop rdx\n", out) }
-            Pokud (uzel->stmt_count > 2) { Volej fputs("    pop r8\n", out) }
-            Pokud (uzel->stmt_count > 3) { Volej fputs("    pop r9\n", out) }
+            Pokud (uzel->stmt_count > 0) { Volej fputs("    pop rcx\n    movq xmm0, rcx\n", out) }
+            Pokud (uzel->stmt_count > 1) { Volej fputs("    pop rdx\n    movq xmm1, rdx\n", out) }
+            Pokud (uzel->stmt_count > 2) { Volej fputs("    pop r8\n    movq xmm2, r8\n", out) }
+            Pokud (uzel->stmt_count > 3) { Volej fputs("    pop r9\n    movq xmm3, r9\n", out) }
         } Jinak {
-            Pokud (uzel->stmt_count > 0) { Volej fputs("    pop rdi\n", out) }
-            Pokud (uzel->stmt_count > 1) { Volej fputs("    pop rsi\n", out) }
-            Pokud (uzel->stmt_count > 2) { Volej fputs("    pop rdx\n", out) }
-            Pokud (uzel->stmt_count > 3) { Volej fputs("    pop rcx\n", out) }
+            Pokud (uzel->stmt_count > 0) { Volej fputs("    pop rdi\n    movq xmm0, rdi\n", out) }
+            Pokud (uzel->stmt_count > 1) { Volej fputs("    pop rsi\n    movq xmm0, rsi\n", out) }
+            Pokud (uzel->stmt_count > 2) { Volej fputs("    pop rdx\n    movq xmm1, rdx\n", out) }
+            Pokud (uzel->stmt_count > 3) { Volej fputs("    pop rcx\n    movq xmm2, rcx\n", out) }
         }
         
         Lokalni nazev_volani = uzel->name
-        Pokud (cilova_platforma == CIL_APPLE && Volej JeExterniJmeno(uzel->name) == 1) {
-            nazev_volani = Volej NazevSymbolu(uzel->name)
-        }
+        Pokud (cilova_platforma == CIL_APPLE && Volej JeExterniJmeno(uzel->name) == 1) { nazev_volani = Volej NazevSymbolu(uzel->name) }
         
-        Volej fputs("    mov eax, 0\n", out)
+        Volej fputs("    mov eax, 4\n", out)
         Volej fputs("    sub rsp, 32\n", out)
         Volej fprintf(out, "    call %s\n", nazev_volani)
         Volej fputs("    add rsp, 32\n", out)
@@ -2220,151 +2725,30 @@ Metoda GenerujVyraz(out, uzel : AST_Node) {
         Lokalni k_smazani = padding
         Pokud (navic > 0) { k_smazani = k_smazani + (navic * 8) }
         Pokud (k_smazani > 0) { Volej fprintf(out, "    add rsp, %d\n", k_smazani) }
-
-        Pokud (Volej strcmp(uzel->name, "fgetc") == 0 || Volej strcmp(uzel->name, "getchar") == 0 || Volej strcmp(uzel->name, "fputc") == 0 || Volej strcmp(uzel->name, "putchar") == 0 || Volej strcmp(uzel->name, "strcmp") == 0 || Volej strcmp(uzel->name, "system") == 0) {
-            Volej fputs("    cdqe\n", out)
-        }
         Vrat 0
     }
 
-    Pokud (uzel->type == AST_ARRAY_READ) {
-        Lokalni sym_arr_rd : Symbol = Volej NajdiSymbol(uzel->name)
-        Pokud (sym_arr_rd != 0) {
-            Volej GenerujVyraz(out, uzel->left)
-            Volej fputs("    push rax\n", out)
-            Pokud (sym_arr_rd->is_global) { Volej fprintf(out, "    mov rax, qword [rel gvar_%s]\n", sym_arr_rd->name) }
-            Jinak {
-                Pokud (sym_arr_rd->offset < 0) { Lokalni k_arr = 0 - sym_arr_rd->offset; Volej fprintf(out, "    mov rax, qword [rbp + %d]\n", k_arr) }
-                Jinak { Volej fprintf(out, "    mov rax, qword [rbp - %d]\n", sym_arr_rd->offset) }
-            }
-            Pokud (uzel->int_val != 0) { Volej fprintf(out, "    add rax, %d\n", uzel->int_val) }
-            Volej fputs("    pop rbx\n", out)
-            Lokalni je_byte_pole = 0
-            Pokud (Volej strcmp(uzel->sub_name, "value") == 0) { je_byte_pole = 1 }
-            Pokud (Volej strcmp(uzel->sub_name, "name") == 0) { je_byte_pole = 1 }
-            Pokud (Volej strcmp(uzel->sub_name, "sub_name") == 0) { je_byte_pole = 1 }
-            Pokud (Volej strcmp(uzel->sub_name, "init_str") == 0) { je_byte_pole = 1 }
-            Pokud (Volej strcmp(uzel->sub_name, "type_name") == 0) { je_byte_pole = 1 }
-            Pokud (Volej strcmp(uzel->sub_name, "struct_name") == 0) { je_byte_pole = 1 }
-            Pokud (Volej strcmp(uzel->sub_name, "member_name") == 0) { je_byte_pole = 1 }
-            Pokud (je_byte_pole == 1) {
-                Volej fputs("    add rax, rbx\n    movzx rax, byte [rax]\n", out)
-            } Jinak {
-                Volej fputs("    imul rbx, 8\n    add rax, rbx\n    mov rax, qword [rax]\n", out)
-            }
-        }
-        Vrat 0
-    }
+    Pokud (uzel->type == AST_ARRAY_READ) { Lokalni sym_arr_rd : Symbol = Volej NajdiSymbol(uzel->name); Pokud (sym_arr_rd != 0) { Volej GenerujVyraz(out, uzel->left); Volej fputs("    push rax\n", out); Pokud (sym_arr_rd->is_global) { Volej fprintf(out, "    mov rax, qword [rel gvar_%s]\n", sym_arr_rd->name) } Jinak { Pokud (sym_arr_rd->offset < 0) { Lokalni k_arr = 0 - sym_arr_rd->offset; Volej fprintf(out, "    mov rax, qword [rbp + %d]\n", k_arr) } Jinak { Volej fprintf(out, "    mov rax, qword [rbp - %d]\n", sym_arr_rd->offset) } }; Pokud (uzel->int_val != 0) { Volej fprintf(out, "    add rax, %d\n", uzel->int_val) }; Volej fputs("    pop rbx\n", out); Lokalni je_byte_pole = 0; Pokud (Volej strcmp(uzel->sub_name, "value") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "name") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "sub_name") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "init_str") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "type_name") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "struct_name") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "member_name") == 0) { je_byte_pole = 1 }; Pokud (je_byte_pole == 1) { Volej fputs("    add rax, rbx\n    movzx rax, byte [rax]\n", out) } Jinak { Volej fputs("    imul rbx, 8\n    add rax, rbx\n    mov rax, qword [rax]\n", out) } }; Vrat 0 }
+    Pokud (uzel->type == AST_LOCAL_ARRAY_READ) { Lokalni sym_loc : Symbol = Volej NajdiSymbol(uzel->name); Pokud (sym_loc != 0) { Volej GenerujVyraz(out, uzel->left); Volej fputs("    imul rax, 8\n    push rbx\n", out); Pokud (sym_loc->is_global) { Volej fprintf(out, "    mov rbx, qword [rel gvar_%s]\n", sym_loc->name) } Jinak { Pokud (sym_loc->offset < 0) { Lokalni k_loc = 0 - sym_loc->offset; Volej fprintf(out, "    mov rbx, qword [rbp + %d]\n", k_loc) } Jinak { Volej fprintf(out, "    mov rbx, qword [rbp - %d]\n", sym_loc->offset) } }; Volej fputs("    add rax, rbx\n    mov rax, qword [rax]\n    pop rbx\n", out) }; Vrat 0 }
+    Pokud (uzel->type == AST_PTR_MEMBER_READ) { Lokalni sym_ptr : Symbol = Volej NajdiSymbol(uzel->name); Pokud (sym_ptr != 0) { Pokud (sym_ptr->is_global) { Volej fprintf(out, "    mov rax, qword [rel gvar_%s]\n", sym_ptr->name) } Jinak { Pokud (sym_ptr->offset < 0) { Lokalni k = 0 - sym_ptr->offset; Volej fprintf(out, "    mov rax, qword [rbp + %d]\n", k) } Jinak { Volej fprintf(out, "    mov rax, qword [rbp - %d]\n", sym_ptr->offset) } }; Lokalni je_pole = 0; Pokud (Volej strcmp(uzel->sub_name, "value") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "name") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "sub_name") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "init_str") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "type_name") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "struct_name") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "member_name") == 0) je_pole = 1; Pokud (je_pole) { Pokud (uzel->int_val != 0) { Volej fprintf(out, "    add rax, %d\n", uzel->int_val) } } Jinak { Pokud (uzel->int_val == 0) { Volej fputs("    mov rax, [rax]\n", out) } Jinak { Volej fprintf(out, "    mov rax, [rax + %d]\n", uzel->int_val) } } }; Vrat 0 }
+    Pokud (uzel->op == TOKEN_IDENTIFIER) { Lokalni sym_id : Symbol = Volej NajdiSymbol(uzel->name); Pokud (sym_id != 0) { Pokud (sym_id->is_const) { Volej fprintf(out, "    mov rax, %d\n", sym_id->const_val) } Jinak Pokud (sym_id->is_global) { Volej fprintf(out, "    mov rax, qword [rel gvar_%s]\n", sym_id->name) } Jinak { Pokud (sym_id->offset < 0) { Lokalni kladny = 0 - sym_id->offset; Volej fprintf(out, "    mov rax, qword [rbp + %d]\n", kladny) } Jinak { Volej fprintf(out, "    mov rax, qword [rbp - %d]\n", sym_id->offset) } } } Jinak { Volej printf("Chyba: Nedeklarovana promenna '%s'\n", uzel->name); Volej exit(1) }; Vrat 0 }
+    Pokud (uzel->op == TOKEN_MINUS && uzel->left != 0 && uzel->right == 0) { Volej GenerujVyraz(out, uzel->left); Volej fputs("    neg rax\n", out); Vrat 0 }
+    Pokud (uzel->op == TOKEN_NOT && uzel->left != 0) { Volej GenerujVyraz(out, uzel->left); Volej fputs("    cmp rax, 0\n    sete al\n    movzx rax, al\n", out); Vrat 0 }
 
-    Pokud (uzel->type == AST_LOCAL_ARRAY_READ) {
-        Lokalni sym_loc : Symbol = Volej NajdiSymbol(uzel->name)
-        Pokud (sym_loc != 0) {
-            Volej GenerujVyraz(out, uzel->left)
-            Volej fputs("    imul rax, 8\n    push rbx\n", out)
-            Pokud (sym_loc->is_global) { Volej fprintf(out, "    lea rbx, [rel gvar_%s]\n", sym_loc->name) }
-            Jinak {
-                Pokud (sym_loc->offset < 0) {
-                    Lokalni k_loc = 0 - sym_loc->offset
-                    Volej fprintf(out, "    lea rbx, [rbp + %d]\n", k_loc)
-                } Jinak { Volej fprintf(out, "    lea rbx, [rbp - %d]\n", sym_loc->offset) }
-            }
-            Volej fputs("    add rax, rbx\n    mov rax, qword [rax]\n    pop rbx\n", out)
-        }
-        Vrat 0
-    }
+    Pokud (uzel->op == TOKEN_AND) { Lokalni lbl_and = citac_navesti; citac_navesti = citac_navesti + 1; Volej GenerujVyraz(out, uzel->left); Volej fputs("    cmp rax, 0\n", out); Volej fprintf(out, "    je .L_false_%d\n", lbl_and); Volej GenerujVyraz(out, uzel->right); Volej fputs("    cmp rax, 0\n", out); Volej fprintf(out, "    je .L_false_%d\n", lbl_and); Volej fputs("    mov rax, 1\n", out); Volej fprintf(out, "    jmp .L_end_%d\n", lbl_and); Volej fprintf(out, ".L_false_%d:\n", lbl_and); Volej fputs("    mov rax, 0\n", out); Volej fprintf(out, ".L_end_%d:\n", lbl_and); Vrat 0 }
+    Pokud (uzel->op == TOKEN_OR) { Lokalni lbl_or = citac_navesti; citac_navesti = citac_navesti + 1; Volej GenerujVyraz(out, uzel->left); Volej fputs("    cmp rax, 0\n", out); Volej fprintf(out, "    jne .L_true_%d\n", lbl_or); Volej GenerujVyraz(out, uzel->right); Volej fputs("    cmp rax, 0\n", out); Volej fprintf(out, "    jne .L_true_%d\n", lbl_or); Volej fputs("    mov rax, 0\n", out); Volej fprintf(out, "    jmp .L_end_%d\n", lbl_or); Volej fprintf(out, ".L_true_%d:\n", lbl_or); Volej fputs("    mov rax, 1\n", out); Volej fprintf(out, ".L_end_%d:\n", lbl_or); Vrat 0 }
 
-    Pokud (uzel->type == AST_PTR_MEMBER_READ) {
-        Lokalni sym_ptr : Symbol = Volej NajdiSymbol(uzel->name)
-        Pokud (sym_ptr != 0) {
-            Pokud (sym_ptr->is_global) { Volej fprintf(out, "    mov rax, qword [rel gvar_%s]\n", sym_ptr->name) }
-            Jinak {
-                Pokud (sym_ptr->offset < 0) { Lokalni k = 0 - sym_ptr->offset; Volej fprintf(out, "    mov rax, qword [rbp + %d]\n", k) }
-                Jinak { Volej fprintf(out, "    mov rax, qword [rbp - %d]\n", sym_ptr->offset) }
-            }
-            Lokalni je_pole = 0
-            Pokud (Volej strcmp(uzel->sub_name, "value") == 0) je_pole = 1
-            Pokud (Volej strcmp(uzel->sub_name, "name") == 0) je_pole = 1
-            Pokud (Volej strcmp(uzel->sub_name, "sub_name") == 0) je_pole = 1
-            Pokud (Volej strcmp(uzel->sub_name, "init_str") == 0) je_pole = 1
-            Pokud (Volej strcmp(uzel->sub_name, "type_name") == 0) je_pole = 1
-            Pokud (Volej strcmp(uzel->sub_name, "struct_name") == 0) je_pole = 1
-            Pokud (Volej strcmp(uzel->sub_name, "member_name") == 0) je_pole = 1
-            Pokud (je_pole) {
-                Pokud (uzel->int_val != 0) { Volej fprintf(out, "    add rax, %d\n", uzel->int_val) }
-            } Jinak {
-                Pokud (uzel->int_val == 0) { Volej fputs("    mov rax, [rax]\n", out) }
-                Jinak { Volej fprintf(out, "    mov rax, [rax + %d]\n", uzel->int_val) }
-            }
-        }
-        Vrat 0
-    }
-
-    Pokud (uzel->op == TOKEN_IDENTIFIER) {
-        Lokalni sym_id : Symbol = Volej NajdiSymbol(uzel->name)
-        Pokud (sym_id != 0) {
-            Pokud (sym_id->is_const) { Volej fprintf(out, "    mov rax, %d\n", sym_id->const_val) }
-            Jinak Pokud (sym_id->is_global) { Volej fprintf(out, "    mov rax, qword [rel gvar_%s]\n", sym_id->name) }
-            Jinak {
-                Pokud (sym_id->offset < 0) { Lokalni kladny = 0 - sym_id->offset; Volej fprintf(out, "    mov rax, qword [rbp + %d]\n", kladny) }
-                Jinak { Volej fprintf(out, "    mov rax, qword [rbp - %d]\n", sym_id->offset) }
-            }
-        } Jinak {
-            Volej printf("Chyba na radku %d: Nedeklarovana promenna '%s'\n", uzel->line, uzel->name)
-            Volej exit(1)
-        }
-        Vrat 0
-    }
-
-    Pokud (uzel->op == TOKEN_MINUS && uzel->left != 0 && uzel->right == 0) {
-        Volej GenerujVyraz(out, uzel->left)
-        Volej fputs("    neg rax\n", out)
-        Vrat 0
-    }
-
-    Pokud (uzel->op == TOKEN_NOT && uzel->left != 0) {
-        Volej GenerujVyraz(out, uzel->left)
-        Volej fputs("    cmp rax, 0\n    sete al\n    movzx rax, al\n", out)
-        Vrat 0
-    }
-
-    Pokud (uzel->op == TOKEN_AND) {
-        Lokalni lbl_and = citac_navesti; citac_navesti = citac_navesti + 1
-        Volej GenerujVyraz(out, uzel->left)
-        Volej fputs("    cmp rax, 0\n", out)
-        Volej fprintf(out, "    je .L_false_%d\n", lbl_and)
-        Volej GenerujVyraz(out, uzel->right)
-        Volej fputs("    cmp rax, 0\n", out)
-        Volej fprintf(out, "    je .L_false_%d\n", lbl_and)
-        Volej fputs("    mov rax, 1\n", out)
-        Volej fprintf(out, "    jmp .L_end_%d\n", lbl_and)
-        Volej fprintf(out, ".L_false_%d:\n", lbl_and)
-        Volej fputs("    mov rax, 0\n", out)
-        Volej fprintf(out, ".L_end_%d:\n", lbl_and)
-        Vrat 0
-    }
-
-    Pokud (uzel->op == TOKEN_OR) {
-        Lokalni lbl_or = citac_navesti; citac_navesti = citac_navesti + 1
-        Volej GenerujVyraz(out, uzel->left)
-        Volej fputs("    cmp rax, 0\n", out)
-        Volej fprintf(out, "    jne .L_true_%d\n", lbl_or)
-        Volej GenerujVyraz(out, uzel->right)
-        Volej fputs("    cmp rax, 0\n", out)
-        Volej fprintf(out, "    jne .L_true_%d\n", lbl_or)
-        Volej fputs("    mov rax, 0\n", out)
-        Volej fprintf(out, "    jmp .L_end_%d\n", lbl_or)
-        Volej fprintf(out, ".L_true_%d:\n", lbl_or)
-        Volej fputs("    mov rax, 1\n", out)
-        Volej fprintf(out, ".L_end_%d:\n", lbl_or)
-        Vrat 0
-    }
-
-    // --- KLASICKÁ MATEMATIKA S PEEPHOLE OPTIMALIZACI ---
+    // Matematika 
     Pokud (uzel->op == TOKEN_PLUS || uzel->op == TOKEN_MINUS || uzel->op == TOKEN_MUL || uzel->op == TOKEN_DIV || uzel->op == TOKEN_MOD || uzel->op == TOKEN_EQEQ || uzel->op == TOKEN_NEQ || uzel->op == TOKEN_LESS || uzel->op == TOKEN_GREATER || uzel->op == TOKEN_LESSEQ || uzel->op == TOKEN_GREATEREQ || uzel->op == TOKEN_AMPER || uzel->op == TOKEN_PIPE || uzel->op == TOKEN_CARET || uzel->op == TOKEN_SHL || uzel->op == TOKEN_SHR) {
         
+        Lokalni je_float = 0
+        Lokalni lt = Volej ZiskejTypUzlu(uzel->left)
+        Lokalni rt = Volej ZiskejTypUzlu(uzel->right)
+        Pokud (Volej strcmp(lt, "Float") == 0 || Volej strcmp(rt, "Float") == 0) { je_float = 1 }
+
         Lokalni prava_strana_je_cislo = 0
         Lokalni pravy_uzel_fast : AST_Node = uzel->right
-        Pokud (pravy_uzel_fast != 0) { Pokud (pravy_uzel_fast->op == TOKEN_NUMBER) { prava_strana_je_cislo = 1 } }
+        Pokud (pravy_uzel_fast != 0) { Pokud (pravy_uzel_fast->op == TOKEN_NUMBER && je_float == 0) { prava_strana_je_cislo = 1 } }
 
         Pokud (prava_strana_je_cislo == 1) {
             Volej GenerujVyraz(out, uzel->left)
@@ -2393,26 +2777,40 @@ Metoda GenerujVyraz(out, uzel : AST_Node) {
             Volej fputs("    mov rbx, rax\n", out)
             Volej fputs("    pop rax\n", out)
             
-            Pokud (uzel->op == TOKEN_PLUS) Volej fputs("    add rax, rbx\n", out)
-            Pokud (uzel->op == TOKEN_MINUS) Volej fputs("    sub rax, rbx\n", out)
-            Pokud (uzel->op == TOKEN_MUL) Volej fputs("    imul rax, rbx\n", out)
-            Pokud (uzel->op == TOKEN_DIV) Volej fputs("    cqo\n    idiv rbx\n", out)
-            Pokud (uzel->op == TOKEN_MOD) Volej fputs("    cqo\n    idiv rbx\n    mov rax, rdx\n", out)
-            Pokud (uzel->op == TOKEN_EQEQ) { Volej fputs("    cmp rax, rbx\n    sete al\n    movzx rax, al\n", out) }
-            Pokud (uzel->op == TOKEN_NEQ) { Volej fputs("    cmp rax, rbx\n    setne al\n    movzx rax, al\n", out) }
-            Pokud (uzel->op == TOKEN_LESS) { Volej fputs("    cmp rax, rbx\n    setl al\n    movzx rax, al\n", out) }
-            Pokud (uzel->op == TOKEN_GREATER) { Volej fputs("    cmp rax, rbx\n    setg al\n    movzx rax, al\n", out) }
-            Pokud (uzel->op == TOKEN_LESSEQ) { Volej fputs("    cmp rax, rbx\n    setle al\n    movzx rax, al\n", out) }
-            Pokud (uzel->op == TOKEN_GREATEREQ) { Volej fputs("    cmp rax, rbx\n    setge al\n    movzx rax, al\n", out) }
-            Pokud (uzel->op == TOKEN_AMPER) { Volej fputs("    and rax, rbx\n", out) }
-            Pokud (uzel->op == TOKEN_PIPE) { Volej fputs("    or rax, rbx\n", out) }
-            Pokud (uzel->op == TOKEN_CARET) { Volej fputs("    xor rax, rbx\n", out) }
-            Pokud (uzel->op == TOKEN_SHL) { Volej fputs("    mov rcx, rbx\n    shl rax, cl\n", out) }
-            Pokud (uzel->op == TOKEN_SHR) { Volej fputs("    mov rcx, rbx\n    sar rax, cl\n", out) }
+            Pokud (je_float == 1) {
+                // --- OPRAVA: movq se vykona pouze pro operace, ktere vraci opet Float ---
+                Volej fputs("    movq xmm0, rax\n    movq xmm1, rbx\n", out)
+                Pokud (uzel->op == TOKEN_PLUS) { Volej fputs("    addsd xmm0, xmm1\n    movq rax, xmm0\n", out) }
+                Jinak Pokud (uzel->op == TOKEN_MINUS) { Volej fputs("    subsd xmm0, xmm1\n    movq rax, xmm0\n", out) }
+                Jinak Pokud (uzel->op == TOKEN_MUL) { Volej fputs("    mulsd xmm0, xmm1\n    movq rax, xmm0\n", out) }
+                Jinak Pokud (uzel->op == TOKEN_DIV) { Volej fputs("    divsd xmm0, xmm1\n    movq rax, xmm0\n", out) }
+                Jinak Pokud (uzel->op == TOKEN_EQEQ) { Volej fputs("    ucomisd xmm0, xmm1\n    sete al\n    movzx rax, al\n", out) }
+                Jinak Pokud (uzel->op == TOKEN_NEQ) { Volej fputs("    ucomisd xmm0, xmm1\n    setne al\n    movzx rax, al\n", out) }
+                Jinak Pokud (uzel->op == TOKEN_LESS) { Volej fputs("    ucomisd xmm0, xmm1\n    setb al\n    movzx rax, al\n", out) }
+                Jinak Pokud (uzel->op == TOKEN_GREATER) { Volej fputs("    ucomisd xmm0, xmm1\n    seta al\n    movzx rax, al\n", out) }
+                Jinak Pokud (uzel->op == TOKEN_LESSEQ) { Volej fputs("    ucomisd xmm0, xmm1\n    setbe al\n    movzx rax, al\n", out) }
+                Jinak Pokud (uzel->op == TOKEN_GREATEREQ) { Volej fputs("    ucomisd xmm0, xmm1\n    setae al\n    movzx rax, al\n", out) }
+            } Jinak {
+                Pokud (uzel->op == TOKEN_PLUS) Volej fputs("    add rax, rbx\n", out)
+                Pokud (uzel->op == TOKEN_MINUS) Volej fputs("    sub rax, rbx\n", out)
+                Pokud (uzel->op == TOKEN_MUL) Volej fputs("    imul rax, rbx\n", out)
+                Pokud (uzel->op == TOKEN_DIV) Volej fputs("    cqo\n    idiv rbx\n", out)
+                Pokud (uzel->op == TOKEN_MOD) Volej fputs("    cqo\n    idiv rbx\n    mov rax, rdx\n", out)
+                Pokud (uzel->op == TOKEN_EQEQ) { Volej fputs("    cmp rax, rbx\n    sete al\n    movzx rax, al\n", out) }
+                Pokud (uzel->op == TOKEN_NEQ) { Volej fputs("    cmp rax, rbx\n    setne al\n    movzx rax, al\n", out) }
+                Pokud (uzel->op == TOKEN_LESS) { Volej fputs("    cmp rax, rbx\n    setl al\n    movzx rax, al\n", out) }
+                Pokud (uzel->op == TOKEN_GREATER) { Volej fputs("    cmp rax, rbx\n    setg al\n    movzx rax, al\n", out) }
+                Pokud (uzel->op == TOKEN_LESSEQ) { Volej fputs("    cmp rax, rbx\n    setle al\n    movzx rax, al\n", out) }
+                Pokud (uzel->op == TOKEN_GREATEREQ) { Volej fputs("    cmp rax, rbx\n    setge al\n    movzx rax, al\n", out) }
+                Pokud (uzel->op == TOKEN_AMPER) { Volej fputs("    and rax, rbx\n", out) }
+                Pokud (uzel->op == TOKEN_PIPE) { Volej fputs("    or rax, rbx\n", out) }
+                Pokud (uzel->op == TOKEN_CARET) { Volej fputs("    xor rax, rbx\n", out) }
+                Pokud (uzel->op == TOKEN_SHL) { Volej fputs("    mov rcx, rbx\n    shl rax, cl\n", out) }
+                Pokud (uzel->op == TOKEN_SHR) { Volej fputs("    mov rcx, rbx\n    sar rax, cl\n", out) }
+            }
         }
     }
 
-    // --- PŘETÍŽENÉ TEXTOVÉ OPERÁTORY ---
     Pokud (uzel->op == 95 || uzel->op == 96 || uzel->op == 97) {
         Volej GenerujVyraz(out, uzel->right)
         Volej fputs("    push rax\n", out)
@@ -2421,7 +2819,7 @@ Metoda GenerujVyraz(out, uzel : AST_Node) {
         Volej fputs("    add rsp, 8\n", out)
         Volej fputs("    pop rbx\n", out)
         
-        Pokud (uzel->op == 95) { // 95 = STRING_PLUS
+        Pokud (uzel->op == 95) {
             Volej fputs("    push rbx\n", out)
             Volej fputs("    push rax\n", out)
             
@@ -2454,7 +2852,7 @@ Metoda GenerujVyraz(out, uzel : AST_Node) {
             Volej fputs("    pop rax\n", out)
             Volej fputs("    add rsp, 16\n", out)
             
-        } Jinak Pokud (uzel->op == 96 || uzel->op == 97) { // 96 = EQEQ, 97 = NEQ
+        } Jinak Pokud (uzel->op == 96 || uzel->op == 97) {
             Pokud (cilova_platforma == CIL_WINDOWS) {
                 Volej fputs("    mov rcx, rax\n", out)
                 Volej fputs("    mov rdx, rbx\n", out)
@@ -2476,8 +2874,6 @@ Metoda GenerujVyraz(out, uzel : AST_Node) {
     }
     Vrat 0
 }
-// GENERATOR ASM (Tvorba strojoveho kodu)
-// ==========================================
 Metoda GenerujAST(out, uzel : AST_Node) {
     Pokud (uzel == 0) Vrat 0
     Pokud (uzel->type == 100) Vrat 0
@@ -2515,11 +2911,15 @@ Metoda GenerujAST(out, uzel : AST_Node) {
         zarovnani = zarovnani - zbytek
         Volej fprintf(out, "    sub rsp, %d\n", zarovnani)
         
+        Volej fputs("    push r12\n    push r13\n    push r14\n    push r15\n", out)
+        
         codegen_sym_start = uzel->sym_start
         codegen_sym_end = uzel->sym_end
         codegen_scoped = 1
         Volej GenerujAST(out, uzel->right)
         codegen_scoped = 0
+        
+        Volej fputs("    pop r15\n    pop r14\n    pop r13\n    pop r12\n", out)
         
         Volej fputs("    mov rsp, rbp\n    pop rbp\n    ret\n\n", out)
         Vrat 0
@@ -2573,13 +2973,13 @@ Metoda GenerujAST(out, uzel : AST_Node) {
             Volej GenerujVyraz(out, uzel->left)
             Volej fputs("    imul rax, 8\n", out)
             Pokud (sym_loc_as->is_global) {
-                Volej fprintf(out, "    lea rbx, [rel gvar_%s]\n", sym_loc_as->name)
+                Volej fprintf(out, "    mov rbx, qword [rel gvar_%s]\n", sym_loc_as->name)
             } Jinak {
                 Pokud (sym_loc_as->offset < 0) {
                     Lokalni k_loc2 = 0 - sym_loc_as->offset
-                    Volej fprintf(out, "    lea rbx, [rbp + %d]\n", k_loc2)
+                    Volej fprintf(out, "    mov rbx, qword [rbp + %d]\n", k_loc2)
                 } Jinak {
-                    Volej fprintf(out, "    lea rbx, [rbp - %d]\n", sym_loc_as->offset)
+                    Volej fprintf(out, "    mov rbx, qword [rbp - %d]\n", sym_loc_as->offset)
                 }
             }
             Volej fputs("    add rbx, rax\n    pop rax\n    mov qword [rbx], rax\n", out)
@@ -2634,13 +3034,35 @@ Metoda GenerujAST(out, uzel : AST_Node) {
 
     Pokud (uzel->type == AST_RETURN) {
         Pokud (uzel->left != 0) Volej GenerujVyraz(out, uzel->left)
+        Volej fputs("    pop r15\n    pop r14\n    pop r13\n    pop r12\n", out)
         Volej fputs("    mov rsp, rbp\n    pop rbp\n    ret\n", out)
         Vrat 0
     }
 
-    Pokud (uzel->type == AST_PRINT) {
+Pokud (uzel->type == AST_PRINT) {
         Volej GenerujVyraz(out, uzel->left)
-        Volej fputs("    mov rdx, rax\n    lea rcx, [rel fmt_int]\n    sub rsp, 32\n    call printf\n    add rsp, 32\n", out)
+        Lokalni typ_p = Volej ZiskejTypUzlu(uzel->left)
+        
+        Pokud (Volej strcmp(typ_p, "Float") == 0) {
+            Pokud (cilova_platforma == CIL_WINDOWS) {
+                Volej fputs("    movq xmm1, rax\n    mov rdx, rax\n    lea rcx, [rel fmt_flt]\n", out)
+            } Jinak {
+                Volej fputs("    movq xmm0, rax\n    lea rdi, [rel fmt_flt]\n    mov eax, 1\n", out)
+            }
+        } Jinak Pokud (Volej strcmp(typ_p, "String") == 0) {
+            Pokud (cilova_platforma == CIL_WINDOWS) {
+                Volej fputs("    mov rdx, rax\n    lea rcx, [rel fmt_str]\n", out)
+            } Jinak {
+                Volej fputs("    mov rsi, rax\n    lea rdi, [rel fmt_str]\n    mov eax, 0\n", out)
+            }
+        } Jinak {
+            Pokud (cilova_platforma == CIL_WINDOWS) {
+                Volej fputs("    mov rdx, rax\n    lea rcx, [rel fmt_int]\n", out)
+            } Jinak {
+                Volej fputs("    mov rsi, rax\n    lea rdi, [rel fmt_int]\n    mov eax, 0\n", out)
+            }
+        }
+        Volej fputs("    sub rsp, 32\n    call printf\n    add rsp, 32\n", out)
         Vrat 0
     }
 
@@ -2677,7 +3099,6 @@ Metoda GenerujAST(out, uzel : AST_Node) {
     }
 
     Pokud (uzel->type == AST_IF) {
-        // --- OPTIMALIZACE: Odstraneni mrtveho kodu (Branch Pruning) ---
         Lokalni levy_uzel_if : AST_Node = uzel->left
         Pokud (levy_uzel_if != 0) {
             Pokud (levy_uzel_if->op == TOKEN_NUMBER) {
@@ -2719,7 +3140,6 @@ Metoda GenerujAST(out, uzel : AST_Node) {
             Vrat 0
         }
         
-        // 1. Analyza tabulky skoku (min/max)
         Lokalni min_val = 99999999
         Lokalni max_val = 0 - 99999999
         Lokalni s_idx = 0
@@ -2739,7 +3159,6 @@ Metoda GenerujAST(out, uzel : AST_Node) {
             Volej exit(1)
         }
         
-        // 2. Normalizace hodnoty
         Volej GenerujVyraz(out, uzel->left)
         Volej fprintf(out, "    sub rax, %d\n", min_val)
         Volej fputs("    cmp rax, 0\n", out)
@@ -2750,7 +3169,6 @@ Metoda GenerujAST(out, uzel : AST_Node) {
         Pokud (uzel->alt != 0) { Volej fprintf(out, "    jg .L_sw_def_%d\n", lbl_sw) }
         Jinak { Volej fprintf(out, "    jg .L_sw_end_%d\n", lbl_sw) }
         
-        // 3. Tabulka skoku (Jump Table)
         Volej fprintf(out, "    jmp .L_sw_code_%d\n", lbl_sw)
         Volej fprintf(out, ".L_sw_table_%d:\n", lbl_sw)
         
@@ -2779,14 +3197,12 @@ Metoda GenerujAST(out, uzel : AST_Node) {
             curr = curr + 1
         }
         
-        // 4. JMP instrukce
         Volej fprintf(out, ".L_sw_code_%d:\n", lbl_sw)
         Volej fprintf(out, "    lea rdx, [rel .L_sw_table_%d]\n", lbl_sw)
         Volej fputs("    movsxd rcx, dword [rdx + rax*4]\n", out)
         Volej fputs("    add rcx, rdx\n", out)
         Volej fputs("    jmp rcx\n", out)
         
-        // 5. Jednotlive vetve Rozcestniku
         s_idx = 0
         Dokud (s_idx < uzel->stmt_count) {
             Lokalni addr2_sw = uzel->stmts + (s_idx * 8)
@@ -2808,7 +3224,6 @@ Metoda GenerujAST(out, uzel : AST_Node) {
     }
 
     Pokud (uzel->type == AST_WHILE) {
-        // --- OPTIMALIZACE: Odstraneni nespustitelneho cyklu ---
         Lokalni levy_uzel_w : AST_Node = uzel->left
         Pokud (levy_uzel_w != 0) {
             Pokud (levy_uzel_w->op == TOKEN_NUMBER) {
@@ -2921,21 +3336,23 @@ Metoda GenerujAST(out, uzel : AST_Node) {
         }
         
         Pokud (cilova_platforma == CIL_WINDOWS) {
-            Pokud (uzel->stmt_count > 0) { Volej fputs("    pop rcx\n", out) }
-            Pokud (uzel->stmt_count > 1) { Volej fputs("    pop rdx\n", out) }
-            Pokud (uzel->stmt_count > 2) { Volej fputs("    pop r8\n", out) }
-            Pokud (uzel->stmt_count > 3) { Volej fputs("    pop r9\n", out) }
+            Pokud (uzel->stmt_count > 0) { Volej fputs("    pop rcx\n    movq xmm0, rcx\n", out) }
+            Pokud (uzel->stmt_count > 1) { Volej fputs("    pop rdx\n    movq xmm1, rdx\n", out) }
+            Pokud (uzel->stmt_count > 2) { Volej fputs("    pop r8\n    movq xmm2, r8\n", out) }
+            Pokud (uzel->stmt_count > 3) { Volej fputs("    pop r9\n    movq xmm3, r9\n", out) }
         } Jinak {
-            Pokud (uzel->stmt_count > 0) { Volej fputs("    pop rdi\n", out) }
-            Pokud (uzel->stmt_count > 1) { Volej fputs("    pop rsi\n", out) }
-            Pokud (uzel->stmt_count > 2) { Volej fputs("    pop rdx\n", out) }
-            Pokud (uzel->stmt_count > 3) { Volej fputs("    pop rcx\n", out) }
+            Pokud (uzel->stmt_count > 0) { Volej fputs("    pop rdi\n    movq xmm0, rdi\n", out) }
+            Pokud (uzel->stmt_count > 1) { Volej fputs("    pop rsi\n    movq xmm0, rsi\n", out) }
+            Pokud (uzel->stmt_count > 2) { Volej fputs("    pop rdx\n    movq xmm1, rdx\n", out) }
+            Pokud (uzel->stmt_count > 3) { Volej fputs("    pop rcx\n    movq xmm2, rcx\n", out) }
         }
         
         Lokalni nazev_volani_ast = uzel->name
         Pokud (cilova_platforma == CIL_APPLE && Volej JeExterniJmeno(uzel->name) == 1) {
             nazev_volani_ast = Volej NazevSymbolu(uzel->name)
         }
+        
+        Volej fputs("    mov eax, 4\n", out)
         Volej fputs("    sub rsp, 32\n", out)
         Volej fprintf(out, "    call %s\n", nazev_volani_ast)
         Volej fputs("    add rsp, 32\n", out)
@@ -2953,8 +3370,9 @@ Metoda GeneratorASM(ast_koren : AST_Node, vystupni_soubor) {
     Volej printf("Generator: Zapisuji do %s...\n", vystupni_soubor)
     Lokalni out = Volej fopen(vystupni_soubor, "w")
 
-    Volej fputs("section .data\n    fmt_int db 37, 100, 10, 0\n    fmt_str_concat db 37, 115, 37, 115, 0\n", out)
+Volej fputs("section .data\n    fmt_int db 37, 100, 10, 0\n    fmt_flt db 37, 102, 10, 0\n    fmt_str db 37, 115, 10, 0\n    fmt_str_concat db 37, 115, 37, 115, 0\n", out)    
     Lokalni i = 0
+    Lokalni flt_id = 0
     Dokud (i < pocet_tokenu) {
         Lokalni t : Token = pamet_tokenu + (i * Velikost(Token))
         Pokud (t->type == TOKEN_STRING) {
@@ -2963,14 +3381,13 @@ Metoda GeneratorASM(ast_koren : AST_Node, vystupni_soubor) {
             Lokalni pokracovat = 1
             Dokud (pokracovat == 1) {
                 Lokalni raw = Volej CtiByt(t->value + sj)
-                Pokud (raw == 0) {
-                    pokracovat = 0
-                } Jinak {
-                    Volej fprintf(out, "%d, ", raw)
-                    sj = sj + 1
-                }
+                Pokud (raw == 0) { pokracovat = 0 } Jinak { Volej fprintf(out, "%d, ", raw); sj = sj + 1 }
             }
             Volej fputs("0\n", out)
+        }
+        Pokud (t->type == 98) {
+            Volej fprintf(out, "    flt%d dq %s\n", flt_id, t->value)
+            flt_id = flt_id + 1
         }
         i = i + 1
     }
@@ -2984,8 +3401,6 @@ Metoda GeneratorASM(ast_koren : AST_Node, vystupni_soubor) {
         s = s + 1
     }
 
-    // Vylepseni: nazev vstupniho bodu a jmena extern-symbolu zavisi na cilove
-    // platforme - Apple (Mach-O) vyzaduje podtrzitko pred C-jmeny, Linux/Windows ne.
     Lokalni hlavni_label = "main"
     Pokud (cilova_platforma == CIL_APPLE) { hlavni_label = "_main" }
 
@@ -3001,22 +3416,17 @@ Metoda GeneratorASM(ast_koren : AST_Node, vystupni_soubor) {
         Lokalni adresa_v_poli = ast_koren->stmts + (k * 8)
         Lokalni pod_uzel : AST_Node = Volej CtiUkazatel(adresa_v_poli)
         Pokud (pod_uzel->type == AST_EXTERN_DECL) {
-            Pokud (cilova_platforma == CIL_APPLE) {
-                Volej fprintf(out, "    extern _%s\n", pod_uzel->name)
-            } Jinak {
-                Volej fprintf(out, "    extern %s\n", pod_uzel->name)
-            }
+            Pokud (cilova_platforma == CIL_APPLE) { Volej fprintf(out, "    extern _%s\n", pod_uzel->name) } 
+            Jinak { Volej fprintf(out, "    extern %s\n", pod_uzel->name) }
         }
         k = k + 1
     }
 
     Volej fprintf(out, "\n%s:\n", hlavni_label)
     Pokud (cilova_platforma == CIL_WINDOWS) {
-        Volej fputs("    mov [rel gvar_sys_argc], rcx\n", out)
-        Volej fputs("    mov [rel gvar_sys_argv], rdx\n", out)
+        Volej fputs("    mov [rel gvar_sys_argc], rcx\n    mov [rel gvar_sys_argv], rdx\n", out)
     } Jinak {
-        Volej fputs("    mov [rel gvar_sys_argc], rdi\n", out)
-        Volej fputs("    mov [rel gvar_sys_argv], rsi\n", out)
+        Volej fputs("    mov [rel gvar_sys_argc], rdi\n    mov [rel gvar_sys_argv], rsi\n", out)
     }
     Volej fputs("    sub rsp, 40\n    call Hlavni\n", out)
     Pokud (cilova_platforma == CIL_WINDOWS) {
@@ -3031,8 +3441,8 @@ Metoda GeneratorASM(ast_koren : AST_Node, vystupni_soubor) {
     Volej fclose(out)
     Vrat 0
 }
-
 Metoda Hlavni() {
+    Volej setvbuf(0, 0, 4, 0)
     pamet_struktur_clenove = Volej calloc(500, 1032)
     pocet_struktur_clenu = 0
     pamet_struktur_def = Volej calloc(100, 520)
@@ -3075,11 +3485,13 @@ Metoda Hlavni() {
         }
     }
 
-    Pokud (cilova_platforma == CIL_APPLE) { Volej printf("Cilova platforma: Apple (macOS, x86-64)\n") }
+     Pokud (cilova_platforma == CIL_APPLE) { Volej printf("Cilova platforma: Apple (macOS, x86-64)\n") }
     Jinak Pokud (cilova_platforma == CIL_LINUX) { Volej printf("Cilova platforma: Linux (x86-64)\n") }
     Jinak { Volej printf("Cilova platforma: Windows (x86-64)\n") }
+    Volej fflush(0)
 
     Volej printf("--- START KOMPILACE ---\n")
+    Volej fflush(0)
 
     // Nova dynamicka kapacita pro tokeny
     pamet_tokenu = Volej calloc(kapacita_tokenu, Velikost(Token))
@@ -3089,7 +3501,11 @@ Metoda Hlavni() {
     
     Volej printf("Typova kontrola...\n")
     Volej ZkontrolujAST(ast)
-    
+ Volej printf("Spoustim Middle-End optimalizace stromu (Inlining, DCE, LICM, CSE)...\n")
+    Volej OptimalizujBezpecnyInlining(ast)
+    Volej OptimalizujDCE(ast)
+    Volej OptimalizujLICM(ast)
+    Volej OptimalizujCSE(ast)
     Lokalni asm_soub = Volej malloc(256)
     Lokalni obj_soub = Volej malloc(256)
     Lokalni exe_soub = Volej malloc(256)
