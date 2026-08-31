@@ -629,27 +629,34 @@ Metoda OptimalizujLICM(blok : AST_Node) {
                                 Lokalni t_prikaz : AST_Node = Volej CtiUkazatel(t_adr)
                                 
                                 // Ochrana před přístupem do prázdného příkazu
-                                Pokud (t_prikaz != 0) {
-                                    Pokud (t_prikaz->type == 4) { // AST_ASSIGN
-                                        Pokud (Volej JeCisteKonstantniVyraz(t_prikaz->right) == 1) {
-                                            Volej printf(">> LICM Magie (-O3): Vytahuji nemmenny vypocet '%s' pred cyklus!\n", t_prikaz->name)
-                                            
-                                            // Trik: Cyklus obalime novym blokem [Vytazeny_Prikaz, Samotny_Cyklus]
-                                            Lokalni novy_blok : AST_Node = Volej VytvorUzel(1, prikaz->line)
-                                            novy_blok->stmt_count = 2
-                                            novy_blok->stmts = Volej calloc(2, 8)
-                                            
-                                            Lokalni vytazeny = Volej KopirujUzel(t_prikaz)
-                                            Volej ZapisUkazatel(novy_blok->stmts + 0, vytazeny)
-                                            Volej ZapisUkazatel(novy_blok->stmts + 8, prikaz)
-                                            
-                                            Volej ZapisUkazatel(adr, novy_blok)
-                                            prikaz = novy_blok
-                                            
-                                            t_prikaz->type = 100 // V cyklu smazeme (AST_NOP)
-                                        }
-                                    }
-                                }
+// Ochrana před přístupem do prázdného příkazu
+Pokud (t_prikaz != 0) {
+    Pokud (t_prikaz->type == 4) { // AST_ASSIGN
+        Pokud (Volej JeCisteKonstantniVyraz(t_prikaz->right) == 1) {
+            
+            // --- NOVA OCHRANA: Nevytahujeme pouha cisla a texty, protoze to nici ridici vlajky cyklu! ---
+            Lokalni op_prava = t_prikaz->right->op
+            Pokud (op_prava != 34 && op_prava != 98 && op_prava != 33) { // 34=Cislo, 98=Float, 33=String
+                
+                Volej printf(">> LICM Magie (-O3): Vytahuji nemmenny vypocet '%s' pred cyklus!\n", t_prikaz->name)
+                
+                // Trik: Cyklus obalime novym blokem [Vytazeny_Prikaz, Samotny_Cyklus]
+                Lokalni novy_blok : AST_Node = Volej VytvorUzel(1, prikaz->line)
+                novy_blok->stmt_count = 2
+                novy_blok->stmts = Volej calloc(2, 8)
+                
+                Lokalni vytazeny = Volej KopirujUzel(t_prikaz)
+                Volej ZapisUkazatel(novy_blok->stmts + 0, vytazeny)
+                Volej ZapisUkazatel(novy_blok->stmts + 8, prikaz)
+                
+                Volej ZapisUkazatel(adr, novy_blok)
+                prikaz = novy_blok
+                
+                t_prikaz->type = 100 // V cyklu smazeme (AST_NOP)
+            }
+        }
+    }
+}
                                 c = c + 1
                             }
                         }
@@ -3886,20 +3893,23 @@ Metoda Hlavni() {
     }
 
     cilova_platforma = CIL_APPLE
+    cilova_platforma = 2 // Windows jako vychozi
     Pokud (sys_argc >= 4) {
         Lokalni cil_arg = CtiZAdresu(sys_argv + 24)
-        Pokud (Volej strcmp(cil_arg, "--cil=apple") == 0) { cilova_platforma = CIL_APPLE }
-        Jinak Pokud (Volej strcmp(cil_arg, "--cil=linux") == 0) { cilova_platforma = CIL_LINUX }
-        Jinak Pokud (Volej strcmp(cil_arg, "--cil=windows") == 0) { cilova_platforma = CIL_WINDOWS }
+        Pokud (Volej strcmp(cil_arg, "--cil=apple") == 0) { cilova_platforma = 0 }
+        Jinak Pokud (Volej strcmp(cil_arg, "--cil=linux") == 0) { cilova_platforma = 1 }
+        Jinak Pokud (Volej strcmp(cil_arg, "--cil=windows") == 0) { cilova_platforma = 2 }
+        Jinak Pokud (Volej strcmp(cil_arg, "--cil=kernel") == 0) { cilova_platforma = 3 } // NOVY CIL
         Jinak {
-            Volej printf("Neznamy cil '%s'. Pouzij --cil=apple, --cil=linux nebo --cil=windows.\n", cil_arg)
+            Volej printf("Neznamy cil '%s'. Pouzij --cil=apple, linux, windows nebo kernel.\n", cil_arg)
             Volej exit(1)
         }
     }
 
-    Pokud (cilova_platforma == CIL_APPLE) { Volej printf("Cilova platforma: Apple (macOS, x86-64)\n") }
-    Jinak Pokud (cilova_platforma == CIL_LINUX) { Volej printf("Cilova platforma: Linux (x86-64)\n") }
-    Jinak { Volej printf("Cilova platforma: Windows (x86-64)\n") }
+    Pokud (cilova_platforma == 0) { Volej printf("Cilova platforma: Apple (macOS, x86-64)\n") }
+    Jinak Pokud (cilova_platforma == 1) { Volej printf("Cilova platforma: Linux (x86-64)\n") }
+    Jinak Pokud (cilova_platforma == 2) { Volej printf("Cilova platforma: Windows (x86-64)\n") }
+    Jinak { Volej printf("Cilova platforma: BARE-METAL KERNEL (Vlastni OS!)\n") } // TISK
     Volej fflush(0)
 
     Volej printf("--- START KOMPILACE ---\n")
@@ -3939,15 +3949,23 @@ Metoda Hlavni() {
 
     Volej GeneratorASM(ast, asm_soub)
 
-    Pokud (cilova_platforma == CIL_APPLE) {
+Pokud (cilova_platforma == 0) {
         Volej sprintf(cmd_nasm, "nasm -f macho64 \"%s\" -o \"%s\"", asm_soub, obj_soub)
         Volej sprintf(cmd_gcc, "clang -s \"%s\" -o \"%s\"", obj_soub, exe_soub)
-    } Jinak Pokud (cilova_platforma == CIL_LINUX) {
+    } Jinak Pokud (cilova_platforma == 1) {
         Volej sprintf(cmd_nasm, "nasm -f elf64 \"%s\" -o \"%s\"", asm_soub, obj_soub)
         Volej sprintf(cmd_gcc, "gcc -s -no-pie \"%s\" -o \"%s\"", obj_soub, exe_soub)
-    } Jinak {
+    } Jinak Pokud (cilova_platforma == 2) {
         Volej sprintf(cmd_nasm, "nasm -f win64 \"%s\" -o \"%s\"", asm_soub, obj_soub)
         Volej sprintf(cmd_gcc, "gcc -s \"%s\" -o \"%s\"", obj_soub, exe_soub)
+    } Jinak Pokud (cilova_platforma == 3) {
+        // --- MAGIE PRO VLASTNI OS (Windows LD Hack) ---
+        // Vygenerujeme to jako Windows objekt (aby to tvuj LD precetl)
+        Volej sprintf(cmd_nasm, "nasm -f win64 \"%s\" -o \"%s\"", asm_soub, obj_soub)
+        
+        // Zpracujeme to Windows linkerem (i386pep), ale ZAKAZEME VSECHNY Windows knihovny (-nostdlib)
+        // A explicitne rekneme, ze OS zacina na stitku _start (-e _start) na adrese 0x100000
+        Volej sprintf(cmd_gcc, "ld -m i386pep -nostdlib -e _start -Ttext 0x100000 -o kernel.bin \"%s\"", obj_soub)
     }
 
     Volej system(cmd_nasm)
