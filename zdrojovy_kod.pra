@@ -141,7 +141,11 @@ Struktura LiveInterval {
     end_instr      // Index posledni IR instrukce, kde se promenna pouzije
     fyzicky_reg    // Napevno prideleni registr: -1 (RAM), nebo 12 (r12), 13 (r13)...
 }
+Konstanta TOKEN_Odloz = 94
+Konstanta AST_DEFER = 34
 
+Globalni pamet_defer = 0
+Globalni pocet_defer = 0
 Globalni pamet_ir = 0
 Globalni pocet_ir = 0
 Globalni kapacita_ir = 10000
@@ -1232,9 +1236,10 @@ Metoda GenerujIR_Vyraz(uzel : AST_Node) {
         Vrat t
     }
 
-    Pokud (uzel->op == 35) {
+  Pokud (uzel->op == 35) {
         Lokalni sym : Symbol = Volej NajdiSymbol(uzel->name)
-        Pokud (sym->is_global || sym->is_const) { Vrat 0 }
+        // PŘIDÁNO: || sym->is_function
+        Pokud (sym->is_global || sym->is_const || sym->is_function) { Vrat 0 } 
         
         Lokalni t2 = Volej NovyTempRegistr()
         Volej EmitujIR(2, t2, sym->offset, 2, 0, 0)
@@ -1624,7 +1629,6 @@ Metoda ZaregistrujDoHashe(sym_index) {
     Volej ZapisUkazatel(adresa_bucketu, sym_index + 1)
     Vrat 0
 }
-
 Metoda ZiskejTypKlicovehoSlova(slovo) {
     Lokalni delka = 0
     Dokud (Volej CtiByt(slovo + delka) != 0) { delka = delka + 1 }
@@ -1651,6 +1655,7 @@ Metoda ZiskejTypKlicovehoSlova(slovo) {
         Pokud (Volej strcmp(slovo, "Lokalni") == 0) { Vrat TOKEN_LOKALNI }
         Pokud (Volej strcmp(slovo, "Externi") == 0) { Vrat TOKEN_EXTERNI }
         Pokud (Volej strcmp(slovo, "Skupina") == 0) { Vrat TOKEN_SKUPINA }
+        Pokud (Volej strcmp(slovo, "Odloz") == 0) { Vrat TOKEN_Odloz }
     } Jinak Pokud (delka == 8) {
         Pokud (Volej strcmp(slovo, "Globalni") == 0) { Vrat TOKEN_GLOBALNI }
         Pokud (Volej strcmp(slovo, "Velikost") == 0) { Vrat TOKEN_VELIKOST }
@@ -2732,6 +2737,13 @@ Metoda ParsePrikaz() {
         Vrat uzel
     }
     
+    Pokud (token->type == 94) { // TOKEN_Odloz
+        uzel = Volej VytvorUzel(34, token->line) // AST_DEFER = 34
+        aktualni_token_idx = aktualni_token_idx + 1
+        uzel->left = Volej ParsePrikaz() // Nacte prikaz, ktery se ma Odloz
+        Vrat uzel
+    }
+    
     Pokud (token->type == 66) { uzel = Volej VytvorUzel(11, token->line); aktualni_token_idx = aktualni_token_idx + 1; uzel->left = Volej ParseVyraz(); Vrat uzel }
     Pokud (token->type == 54) { uzel = Volej VytvorUzel(22, token->line); aktualni_token_idx = aktualni_token_idx + 1; Vrat uzel }
     Pokud (token->type == 56) { uzel = Volej VytvorUzel(23, token->line); aktualni_token_idx = aktualni_token_idx + 1; Vrat uzel }
@@ -3283,12 +3295,27 @@ Metoda GenerujVyraz(out, uzel : AST_Node) {
             Pokud (uzel->stmt_count > 3) { Volej EmitujASM("    pop rcx\n    movq xmm2, rcx\n") }
         }
         
-        Lokalni nazev_volani = uzel->name
-        Pokud (cilova_platforma == 0 && Volej JeExterniJmeno(uzel->name) == 1) { nazev_volani = Volej NazevSymbolu(uzel->name) }
+        Lokalni sym_vol : Symbol = Volej NajdiSymbol(uzel->name)
         
         Volej EmitujASM("    mov eax, 4\n")
         Volej EmitujASM("    sub rsp, 32\n")
-        Volej EmitujASM_1("    call %s\n", nazev_volani)
+        
+        Pokud (sym_vol != 0 && sym_vol->is_function == 0) {
+            // Dynamicke volani pres ukazatel (promennou)
+            Pokud (sym_vol->is_global) { 
+                Volej EmitujASM_1("    mov r11, qword [rel gvar_%s]\n", sym_vol->name)
+            } Jinak { 
+                Pokud (sym_vol->offset < 0) { Volej EmitujASM_1("    mov r11, qword [rbp + %d]\n", 0 - sym_vol->offset) } 
+                Jinak { Volej EmitujASM_1("    mov r11, qword [rbp - %d]\n", sym_vol->offset) } 
+            }
+            Volej EmitujASM("    call r11\n")
+        } Jinak {
+            // Klasicke staticke volani metody
+            Lokalni nazev_volani = uzel->name
+            Pokud (cilova_platforma == 0 && Volej JeExterniJmeno(uzel->name) == 1) { nazev_volani = Volej NazevSymbolu(uzel->name) }
+            Volej EmitujASM_1("    call %s\n", nazev_volani)
+        }
+        
         Volej EmitujASM("    add rsp, 32\n")
 
         Lokalni k_smazani = padding
@@ -3300,8 +3327,26 @@ Metoda GenerujVyraz(out, uzel : AST_Node) {
     Pokud (uzel->type == 27) { Lokalni sym_arr_rd : Symbol = Volej NajdiSymbol(uzel->name); Pokud (sym_arr_rd != 0) { Volej GenerujVyraz(out, uzel->left); Volej EmitujASM("    push rax\n"); Pokud (sym_arr_rd->is_global) { Volej EmitujASM_1("    mov rax, qword [rel gvar_%s]\n", sym_arr_rd->name) } Jinak { Pokud (sym_arr_rd->offset < 0) { Volej EmitujASM_1("    mov rax, qword [rbp + %d]\n", 0 - sym_arr_rd->offset) } Jinak { Volej EmitujASM_1("    mov rax, qword [rbp - %d]\n", sym_arr_rd->offset) } }; Pokud (uzel->int_val != 0) { Volej EmitujASM_1("    add rax, %d\n", uzel->int_val) }; Volej EmitujASM("    pop rbx\n"); Lokalni je_byte_pole = 0; Pokud (Volej strcmp(uzel->sub_name, "value") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "name") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "sub_name") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "init_str") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "type_name") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "struct_name") == 0) { je_byte_pole = 1 }; Pokud (Volej strcmp(uzel->sub_name, "member_name") == 0) { je_byte_pole = 1 }; Pokud (je_byte_pole == 1) { Volej EmitujASM("    add rax, rbx\n    movzx rax, byte [rax]\n") } Jinak { Volej EmitujASM("    imul rbx, 8\n    add rax, rbx\n    mov rax, qword [rax]\n") } }; Vrat 0 }
     Pokud (uzel->type == 32) { Lokalni sym_loc : Symbol = Volej NajdiSymbol(uzel->name); Pokud (sym_loc != 0) { Volej GenerujVyraz(out, uzel->left); Volej EmitujASM("    imul rax, 8\n    push rbx\n"); Pokud (sym_loc->is_global) { Volej EmitujASM_1("    mov rbx, qword [rel gvar_%s]\n", sym_loc->name) } Jinak { Pokud (sym_loc->offset < 0) { Volej EmitujASM_1("    mov rbx, qword [rbp + %d]\n", 0 - sym_loc->offset) } Jinak { Volej EmitujASM_1("    mov rbx, qword [rbp - %d]\n", sym_loc->offset) } }; Volej EmitujASM("    add rax, rbx\n    mov rax, qword [rax]\n    pop rbx\n") }; Vrat 0 }
     Pokud (uzel->type == 16) { Lokalni sym_ptr : Symbol = Volej NajdiSymbol(uzel->name); Pokud (sym_ptr != 0) { Pokud (sym_ptr->is_global) { Volej EmitujASM_1("    mov rax, qword [rel gvar_%s]\n", sym_ptr->name) } Jinak { Pokud (sym_ptr->offset < 0) { Volej EmitujASM_1("    mov rax, qword [rbp + %d]\n", 0 - sym_ptr->offset) } Jinak { Volej EmitujASM_1("    mov rax, qword [rbp - %d]\n", sym_ptr->offset) } }; Lokalni je_pole = 0; Pokud (Volej strcmp(uzel->sub_name, "value") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "name") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "sub_name") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "init_str") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "type_name") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "struct_name") == 0) je_pole = 1; Pokud (Volej strcmp(uzel->sub_name, "member_name") == 0) je_pole = 1; Pokud (je_pole) { Pokud (uzel->int_val != 0) { Volej EmitujASM_1("    add rax, %d\n", uzel->int_val) } } Jinak { Pokud (uzel->int_val == 0) { Volej EmitujASM("    mov rax, [rax]\n") } Jinak { Volej EmitujASM_1("    mov rax, [rax + %d]\n", uzel->int_val) } } }; Vrat 0 }
-    Pokud (uzel->op == 35) { Lokalni sym_id : Symbol = Volej NajdiSymbol(uzel->name); Pokud (sym_id != 0) { Pokud (sym_id->is_const) { Volej EmitujASM_1("    mov rax, %d\n", sym_id->const_val) } Jinak Pokud (sym_id->is_global) { Volej EmitujASM_1("    mov rax, qword [rel gvar_%s]\n", sym_id->name) } Jinak { Pokud (sym_id->offset < 0) { Volej EmitujASM_1("    mov rax, qword [rbp + %d]\n", 0 - sym_id->offset) } Jinak { Volej EmitujASM_1("    mov rax, qword [rbp - %d]\n", sym_id->offset) } } } Jinak { Volej printf("Chyba: Nedeklarovana promenna '%s'\n", uzel->name); Volej exit(1) }; Vrat 0 }
-    Pokud (uzel->op == 44 && uzel->left != 0 && uzel->right == 0) { Volej GenerujVyraz(out, uzel->left); Volej EmitujASM("    neg rax\n"); Vrat 0 }
+Pokud (uzel->op == 35) { 
+        Lokalni sym_id : Symbol = Volej NajdiSymbol(uzel->name)
+        Pokud (sym_id != 0) { 
+            Pokud (sym_id->is_function) {
+                Lokalni func_name = sym_id->name
+                Pokud (cilova_platforma == 0 && Volej JeExterniJmeno(func_name) == 1) { func_name = Volej NazevSymbolu(func_name) }
+                Volej EmitujASM_1("    lea rax, [rel %s]\n", func_name)
+            } Jinak Pokud (sym_id->is_const) { 
+                Volej EmitujASM_1("    mov rax, %d\n", sym_id->const_val) 
+            } Jinak Pokud (sym_id->is_global) { 
+                Volej EmitujASM_1("    mov rax, qword [rel gvar_%s]\n", sym_id->name) 
+            } Jinak { 
+                Pokud (sym_id->offset < 0) { Volej EmitujASM_1("    mov rax, qword [rbp + %d]\n", 0 - sym_id->offset) } 
+                Jinak { Volej EmitujASM_1("    mov rax, qword [rbp - %d]\n", sym_id->offset) } 
+            } 
+        } Jinak { 
+            Volej printf("Chyba: Nedeklarovana promenna '%s'\n", uzel->name); Volej exit(1) 
+        }
+        Vrat 0 
+    }    Pokud (uzel->op == 44 && uzel->left != 0 && uzel->right == 0) { Volej GenerujVyraz(out, uzel->left); Volej EmitujASM("    neg rax\n"); Vrat 0 }
     Pokud (uzel->op == 81 && uzel->left != 0) { Volej GenerujVyraz(out, uzel->left); Volej EmitujASM("    cmp rax, 0\n    sete al\n    movzx rax, al\n"); Vrat 0 }
 
     Pokud (uzel->op == 47) { Lokalni lbl_and = citac_navesti; citac_navesti = citac_navesti + 1; Volej GenerujVyraz(out, uzel->left); Volej EmitujASM("    cmp rax, 0\n"); Volej EmitujASM_1("    je .L_false_%d\n", lbl_and); Volej GenerujVyraz(out, uzel->right); Volej EmitujASM("    cmp rax, 0\n"); Volej EmitujASM_1("    je .L_false_%d\n", lbl_and); Volej EmitujASM("    mov rax, 1\n"); Volej EmitujASM_1("    jmp .L_end_%d\n", lbl_and); Volej EmitujASM_1(".L_false_%d:\n", lbl_and); Volej EmitujASM("    mov rax, 0\n"); Volej EmitujASM_1(".L_end_%d:\n", lbl_and); Vrat 0 }
@@ -3430,6 +3475,17 @@ Metoda GenerujVyraz(out, uzel : AST_Node) {
 Metoda GenerujAST(out, uzel : AST_Node) {
     Pokud (uzel == 0) { Vrat 0 }
     Pokud (uzel->type == 100) { Vrat 0 }
+    
+    Pokud (uzel->type == 34) { // AST_DEFER
+        Pokud (pocet_defer < 499) {
+            Volej ZapisUkazatel(pamet_defer + (pocet_defer * 8), uzel->left)
+            pocet_defer = pocet_defer + 1
+        } Jinak {
+            Volej printf("Kriticka chyba: Prekrocen limit 500 odlozenych prikazu na metodu!\n")
+            Volej exit(1)
+        }
+        Vrat 0
+    }
 
     Pokud (uzel->type == 0) { // 0 = AST_PROGRAM
         Lokalni i = 0
@@ -3447,6 +3503,7 @@ Metoda GenerujAST(out, uzel : AST_Node) {
         pocet_ir = 0
         pocet_intervalu = 0
         citac_temp_reg = 1
+        pocet_defer = 0 // Reset defers for the new method
         
         Pokud (Volej strcmp(uzel->name, "") == 0) { Volej EmitujASM("anonymni_funkce:\n") }
         Jinak { Volej EmitujASM_1("%s:\n", uzel->name) }
@@ -3472,6 +3529,14 @@ Metoda GenerujAST(out, uzel : AST_Node) {
         Volej GenerujAST(out, uzel->right) // Zkompilujeme cele telo jako IR!
         
         codegen_scoped = 0
+        
+        // Zpracuj zbyle defers pro případ, kdy funkce nemá explicitní Vrat na konci
+        Lokalni d_end = pocet_defer - 1
+        Dokud (d_end >= 0) {
+            Lokalni d_uzel_end : AST_Node = Volej CtiUkazatel(pamet_defer + (d_end * 8))
+            Volej GenerujAST(out, d_uzel_end)
+            d_end = d_end - 1
+        }
         
         Volej EmitujASM("    pop r15\n    pop r14\n    pop r13\n    pop r12\n")
         Volej EmitujASM("    mov rsp, rbp\n    pop rbp\n    ret\n\n")
@@ -3574,6 +3639,14 @@ Metoda GenerujAST(out, uzel : AST_Node) {
         }
         
         Pokud (je_tco == 1) {
+            // Pred spustenim TCO je kriticke vyvolat vsechny DEFER operace
+            Lokalni dt = pocet_defer - 1
+            Dokud (dt >= 0) {
+                Lokalni dt_uzel : AST_Node = Volej CtiUkazatel(pamet_defer + (dt * 8))
+                Volej GenerujAST(out, dt_uzel)
+                dt = dt - 1
+            }
+            
             Lokalni arg_idx_t = call_uzel->stmt_count - 1
             Dokud (arg_idx_t >= 0) {
                 Lokalni arg_node_t : AST_Node = Volej CtiUkazatel(call_uzel->stmts + (arg_idx_t * 8))
@@ -3601,7 +3674,18 @@ Metoda GenerujAST(out, uzel : AST_Node) {
             Pokud (cilova_platforma == 0 && Volej JeExterniJmeno(call_uzel->name) == 1) { n_tco = Volej NazevSymbolu(call_uzel->name) }
             Volej EmitujASM_1("    jmp %s\n", n_tco)
         } Jinak {
-            Pokud (uzel->left != 0) Volej GenerujVyraz(out, uzel->left)
+            Pokud (uzel->left != 0) { Volej GenerujVyraz(out, uzel->left) }
+            
+            // OCHRANA NAVRATOVE HODNOTY (RAX) PRED DEFER PROCEDURAMI
+            Volej EmitujASM("    push rax\n")
+            Lokalni dr = pocet_defer - 1
+            Dokud (dr >= 0) {
+                Lokalni dr_uzel : AST_Node = Volej CtiUkazatel(pamet_defer + (dr * 8))
+                Volej GenerujAST(out, dr_uzel)
+                dr = dr - 1
+            }
+            Volej EmitujASM("    pop rax\n") // Vraceni vypocteneho vysledku
+
             Volej EmitujASM("    pop r15\n    pop r14\n    pop r13\n    pop r12\n")
             Volej EmitujASM("    mov rsp, rbp\n    pop rbp\n    ret\n")
         }
@@ -3646,9 +3730,8 @@ Metoda GenerujAST(out, uzel : AST_Node) {
         Vrat 0
     }
 
-    // --- NOVA DOBA: CFG SKOKY MISTO RAW TEXTU ---
    Pokud (uzel->type == 6) { // AST_IF
-        Lokalni l_if : AST_Node = uzel->left // <--- ZDE CHYBĚL TYP!
+        Lokalni l_if : AST_Node = uzel->left 
         Pokud (l_if != 0 && l_if->op == 34) {
             Pokud (Volej atoi(l_if->name) == 0) {
                 Pokud (uzel->alt != 0) { Volej GenerujAST(out, uzel->alt) }
@@ -3675,7 +3758,7 @@ Metoda GenerujAST(out, uzel : AST_Node) {
     }
 
     Pokud (uzel->type == 7) { // AST_WHILE
-        Lokalni l_w : AST_Node = uzel->left // <--- ZDE CHYBĚL TYP!
+        Lokalni l_w : AST_Node = uzel->left 
         Pokud (l_w != 0 && l_w->op == 34) {
             Pokud (Volej atoi(l_w->name) == 0) { Vrat 0 }
         }
@@ -3737,7 +3820,7 @@ Metoda GenerujAST(out, uzel : AST_Node) {
         Vrat 0
     }
 
-    Pokud (uzel->type == 20) { // AST_CALL jako Prikaz
+   Pokud (uzel->type == 20) { // AST_CALL jako Prikaz
         Lokalni n = uzel->stmt_count - 4
         Lokalni pad = 0
         Pokud (n > 0) {
@@ -3765,12 +3848,27 @@ Metoda GenerujAST(out, uzel : AST_Node) {
             Pokud (uzel->stmt_count > 3) { Volej EmitujASM("    pop rcx\n    movq xmm2, rcx\n") }
         }
         
-        Lokalni n_vol = uzel->name
-        Pokud (cilova_platforma == 0 && Volej JeExterniJmeno(uzel->name) == 1) { n_vol = Volej NazevSymbolu(uzel->name) }
+        Lokalni sym_vol : Symbol = Volej NajdiSymbol(uzel->name)
         
         Volej EmitujASM("    mov eax, 4\n")
         Volej EmitujASM("    sub rsp, 32\n")
-        Volej EmitujASM_1("    call %s\n", n_vol)
+        
+        Pokud (sym_vol != 0 && sym_vol->is_function == 0) {
+            // Dynamicke volani pres ukazatel (promennou)
+            Pokud (sym_vol->is_global) { 
+                Volej EmitujASM_1("    mov r11, qword [rel gvar_%s]\n", sym_vol->name)
+            } Jinak { 
+                Pokud (sym_vol->offset < 0) { Volej EmitujASM_1("    mov r11, qword [rbp + %d]\n", 0 - sym_vol->offset) } 
+                Jinak { Volej EmitujASM_1("    mov r11, qword [rbp - %d]\n", sym_vol->offset) } 
+            }
+            Volej EmitujASM("    call r11\n")
+        } Jinak {
+            // Klasicke staticke volani metody
+            Lokalni n_vol = uzel->name
+            Pokud (cilova_platforma == 0 && Volej JeExterniJmeno(uzel->name) == 1) { n_vol = Volej NazevSymbolu(uzel->name) }
+            Volej EmitujASM_1("    call %s\n", n_vol)
+        }
+        
         Volej EmitujASM("    add rsp, 32\n")
 
         Lokalni k_s = pad
@@ -3878,6 +3976,10 @@ Metoda Hlavni() {
     pamet_externu = Volej calloc(200, 256)
     pocet_externu = 0
     
+    // ZASOBNIK PRO DEFER (Odloz) - az 500 odlozeni na jednu metodu
+    pamet_defer = Volej calloc(500, 8)
+    pocet_defer = 0
+    
     Volej PridejGlobalniSymbol("sys_argc", 0)
     Volej PridejGlobalniSymbol("sys_argv", 0)
 
@@ -3949,7 +4051,7 @@ Metoda Hlavni() {
 
     Volej GeneratorASM(ast, asm_soub)
 
-Pokud (cilova_platforma == 0) {
+    Pokud (cilova_platforma == 0) {
         Volej sprintf(cmd_nasm, "nasm -f macho64 \"%s\" -o \"%s\"", asm_soub, obj_soub)
         Volej sprintf(cmd_gcc, "clang -s \"%s\" -o \"%s\"", obj_soub, exe_soub)
     } Jinak Pokud (cilova_platforma == 1) {
@@ -3960,11 +4062,7 @@ Pokud (cilova_platforma == 0) {
         Volej sprintf(cmd_gcc, "gcc -s \"%s\" -o \"%s\"", obj_soub, exe_soub)
     } Jinak Pokud (cilova_platforma == 3) {
         // --- MAGIE PRO VLASTNI OS (Windows LD Hack) ---
-        // Vygenerujeme to jako Windows objekt (aby to tvuj LD precetl)
         Volej sprintf(cmd_nasm, "nasm -f win64 \"%s\" -o \"%s\"", asm_soub, obj_soub)
-        
-        // Zpracujeme to Windows linkerem (i386pep), ale ZAKAZEME VSECHNY Windows knihovny (-nostdlib)
-        // A explicitne rekneme, ze OS zacina na stitku _start (-e _start) na adrese 0x100000
         Volej sprintf(cmd_gcc, "ld -m i386pep -nostdlib -e _start -Ttext 0x100000 -o kernel.bin \"%s\"", obj_soub)
     }
 
