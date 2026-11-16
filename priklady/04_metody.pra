@@ -1,0 +1,29 @@
+// Vlastni metody (funkce) a rekurze
+Metoda Ctverec(x) {
+    Vrat x * x
+}
+
+Metoda Faktorial(n) {
+    Pokud (n <= 1) { Vrat 1 }
+    Vrat n * Faktorial(n - 1)
+}
+
+Metoda JePrvocislo(n) {
+    Pokud (n < 2) { Vrat 0 }
+    Lokalni d = 2
+    Dokud (d * d <= n) {
+        Pokud (n % d == 0) { Vrat 0 }
+        d = d + 1
+    }
+    Vrat 1
+}
+
+Metoda Hlavni() {
+    Vypis Ctverec(12)
+    Vypis Faktorial(10)
+    Vypis "Prvocisla do 30:"
+    Opakuj (Lokalni i = 1, i <= 30, i = i + 1) {
+        Pokud (JePrvocislo(i)) { Vypis i }
+    }
+    Vrat 0
+}

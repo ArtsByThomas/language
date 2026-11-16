@@ -1,0 +1,15 @@
+// Vypocet pi integraci 4/(1+x^2) na [0,1] (50 milionu kroku) - desetinna cisla v cyklu
+Metoda Hlavni() {
+    Lokalni n = 50000000
+    Lokalni h : Float = 1.0 / n
+    Lokalni s : Float = 0.0
+    Lokalni x : Float = 0.0
+    Lokalni i = 0
+    Dokud (i < n) {
+        x = (i + 0.5) * h
+        s = s + 4.0 / (1.0 + x * x)
+        i = i + 1
+    }
+    Vypis s * h
+    Vrat 0
+}

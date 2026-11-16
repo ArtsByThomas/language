@@ -1,0 +1,5 @@
+// Prvni program: vypise pozdrav
+Metoda Hlavni() {
+    Vypis "Ahoj, svete!"
+    Vrat 0
+}

@@ -1,0 +1,26 @@
+// Pole: bublinkove razeni a tabulka (2D pole)
+Konstanta N = 8
+
+Metoda Hlavni() {
+    Lokalni cisla[N]
+    cisla[0] = 42; cisla[1] = 7; cisla[2] = 19; cisla[3] = 3
+    cisla[4] = 88; cisla[5] = 1; cisla[6] = 56; cisla[7] = 23
+
+    Opakuj (Lokalni i = 0, i < N - 1, i = i + 1) {
+        Opakuj (Lokalni j = 0, j < N - 1 - i, j = j + 1) {
+            Pokud (cisla[j] > cisla[j + 1]) {
+                Lokalni pom = cisla[j]
+                cisla[j] = cisla[j + 1]
+                cisla[j + 1] = pom
+            }
+        }
+    }
+    Opakuj (Lokalni k = 0, k < N, k = k + 1) { Vypis cisla[k] }
+
+    Lokalni tabulka[3][3]
+    Opakuj (Lokalni r = 0, r < 3, r = r + 1) {
+        Opakuj (Lokalni s = 0, s < 3, s = s + 1) { tabulka[r][s] = (r + 1) * (s + 1) }
+    }
+    Vypis tabulka[2][2]
+    Vrat 0
+}

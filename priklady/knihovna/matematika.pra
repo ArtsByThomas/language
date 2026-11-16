@@ -1,0 +1,15 @@
+// Mala knihovna, kterou jine programy vkladaji prikazem Zahrn
+Metoda Nsd(a, b) {
+    Dokud (b != 0) {
+        Lokalni t = a % b
+        a = b
+        b = t
+    }
+    Vrat a
+}
+
+Metoda Mocnina(zaklad, exponent) {
+    Lokalni v = 1
+    Opakuj (Lokalni i = 0, i < exponent, i = i + 1) { v = v * zaklad }
+    Vrat v
+}

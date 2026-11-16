@@ -1,0 +1,17 @@
+// Cykly: nasobilka a soucet
+Metoda Hlavni() {
+    Vypis "Nasobilka cisla 7:"
+    Opakuj (Lokalni i = 1, i <= 10, i = i + 1) {
+        Vypis 7 * i
+    }
+
+    Lokalni soucet = 0
+    Lokalni n = 1
+    Dokud (n <= 100) {
+        soucet = soucet + n
+        n = n + 1
+    }
+    Vypis "Soucet cisel 1 az 100:"
+    Vypis soucet
+    Vrat 0
+}

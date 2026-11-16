@@ -1,0 +1,30 @@
+// Hra: hadani cisla (pouziva funkce knihovny C: rand, srand, time, scanf)
+Externi rand
+Externi srand
+Externi time
+Externi scanf
+
+Metoda Hlavni() {
+    Volej srand(time(0))
+    Lokalni tajne = rand() % 100 + 1
+    Lokalni misto = Alokuj 8          // sem scanf zapise nactene cislo
+    Lokalni pokusy = 0
+    Vypis "Myslim si cislo od 1 do 100. Hadej!"
+    Dokud (1) {
+        Pokud (scanf("%lld", misto) != 1) {
+            Vypis "To neni cislo, koncim."
+            Vrat 1
+        }
+        Lokalni tip = CtiZAdresu(misto)
+        pokusy = pokusy + 1
+        Pokud (tip < tajne) { Vypis "Vic." }
+        Jinak Pokud (tip > tajne) { Vypis "Min." }
+        Jinak {
+            Vypis "Uhodl jsi! Pocet pokusu:"
+            Vypis pokusy
+            Ukonci
+        }
+    }
+    Uvolni misto
+    Vrat 0
+}

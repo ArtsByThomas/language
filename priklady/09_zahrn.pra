@@ -1,0 +1,8 @@
+// Program rozdeleny do vice souboru
+Zahrn "knihovna/matematika.pra"
+
+Metoda Hlavni() {
+    Vypis Nsd(84, 36)
+    Vypis Mocnina(2, 20)
+    Vrat 0
+}

@@ -1,0 +1,27 @@
+// Zapis a cteni souboru pomoci knihovny C
+Externi fopen
+Externi fclose
+Externi fputs
+Externi fgets
+
+Metoda Hlavni() {
+    Lokalni f = fopen("pokus.txt", "w")
+    Pokud (f == 0) { Vypis "Soubor nelze vytvorit."; Vrat 1 }
+    Odloz Vypis "Hotovo."               // provede se pri odchodu z metody
+    fputs("prvni radek\n", f)
+    fputs("druhy radek\n", f)
+    fclose(f)
+
+    f = fopen("pokus.txt", "r")
+    Lokalni radek = Alokuj 256
+    Lokalni cislo = 0
+    Dokud (fgets(radek, 256, f) != 0) {
+        cislo = cislo + 1
+        Lokalni r : String = radek
+        Vypis r
+    }
+    fclose(f)
+    Uvolni radek
+    Vypis cislo
+    Vrat 0
+}

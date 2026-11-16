@@ -1,0 +1,45 @@
+// Struktury a dynamicka pamet: jednoduchy seznam zaku
+Externi strncpy
+
+Struktura Zak {
+    jmeno[4]        // text az 31 znaku (pole ve strukture = text; rezervuje 4 x 8 bajtu)
+    body
+    dalsi           // ukazatel na dalsiho zaka (0 = konec seznamu)
+}
+
+Globalni prvni = 0
+
+Metoda Pridej(jmeno, body) {
+    Lokalni z : Zak = Alokuj Velikost(Zak)    // pamet je vynulovana
+    Volej strncpy(z->jmeno, jmeno, 31)
+    z->body = body
+    z->dalsi = prvni
+    prvni = z
+}
+
+Metoda Hlavni() {
+    Pridej("Anna", 92)
+    Pridej("Bohous", 71)
+    Pridej("Cyril", 85)
+
+    Lokalni z : Zak = prvni
+    Lokalni soucet = 0
+    Lokalni pocet = 0
+    Dokud (z != 0) {
+        Vypis z->jmeno
+        soucet = soucet + z->body
+        pocet = pocet + 1
+        z = z->dalsi
+    }
+    Vypis "Prumer bodu:"
+    Vypis soucet / pocet
+
+    // Uklid pameti
+    z = prvni
+    Dokud (z != 0) {
+        Lokalni dalsi = z->dalsi
+        Uvolni z
+        z = dalsi
+    }
+    Vrat 0
+}

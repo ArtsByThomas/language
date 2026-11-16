@@ -1,0 +1,8 @@
+Metoda Fib(n) {
+    Pokud (n < 2) { Vrat n }
+    Vrat Fib(n - 1) + Fib(n - 2)
+}
+Metoda Hlavni() {
+    Vypis Fib(40)
+    Vrat 0
+}

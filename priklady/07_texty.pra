@@ -1,0 +1,37 @@
+// Prace s texty: delka, otoceni, pocitani slov
+Externi strlen
+
+Metoda Otoc(text) {
+    Lokalni delka = strlen(text)
+    Lokalni vysledek = Alokuj delka + 1
+    Opakuj (Lokalni i = 0, i < delka, i = i + 1) {
+        ZapisBajt(vysledek + i, CtiBajt(text + delka - 1 - i))
+    }
+    Vrat vysledek
+}
+
+Metoda PocetSlov(text) {
+    Lokalni slov = 0
+    Lokalni ve_slove = 0
+    Lokalni i = 0
+    Dokud (CtiBajt(text + i) != 0) {
+        Lokalni znak = CtiBajt(text + i)
+        Pokud (znak == ' ') { ve_slove = 0 }
+        Jinak Pokud (ve_slove == 0) { ve_slove = 1; slov = slov + 1 }
+        i = i + 1
+    }
+    Vrat slov
+}
+
+Metoda Hlavni() {
+    Lokalni veta = "Pramen je jednoduchy jazyk"
+    Vypis veta
+    Lokalni otocena : String = Otoc(veta)
+    Vypis otocena
+    Vypis "Pocet slov:"
+    Vypis PocetSlov(veta)
+    Lokalni spojeny = veta + "!" + " A je rychly."
+    Vypis spojeny
+    Pokud (veta == "Pramen je jednoduchy jazyk") { Vypis "Texty se shoduji." }
+    Vrat 0
+}

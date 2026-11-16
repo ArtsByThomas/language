@@ -1,0 +1,67 @@
+// ==========================================================================
+// Ukazkove jadro operacniho systemu v jazyce Pramen (x86-64, PC / QEMU)
+//
+// Preklad a spusteni: viz spust_x86.sh (zavadec start32.asm prepne CPU do 64 bitu)
+// Jadro pise na seriovou linku COM1 (port 0x3F8) a na obrazovku (textovy rezim VGA).
+// ==========================================================================
+
+Konstanta COM1 = 0x3F8
+Konstanta VGA = 0xB8000
+Globalni vga_pozice = 0
+
+// Zapis bajtu na I/O port. Parametry jsou v metode s Asm vzdy v pameti:
+// prvni na [rbp+16], druhy na [rbp+24].
+Metoda PortZapis(port, hodnota) {
+    Asm "x86:mov rdx, [rbp+16]"
+    Asm "x86:mov rax, [rbp+24]"
+    Asm "x86:out dx, al"
+}
+
+Metoda PortCti(port) {
+    Lokalni hodnota = 0                 // prvni lokalni promenna je na [rbp-8]
+    Asm "x86:mov rdx, [rbp+16]"
+    Asm "x86:xor eax, eax"
+    Asm "x86:in al, dx"
+    Asm "x86:mov [rbp-8], rax"
+    Vrat hodnota
+}
+
+Metoda PisZnak(znak) {
+    Dokud ((PortCti(COM1 + 5) & 32) == 0) { }      // cekame na volny vysilac
+    PortZapis(COM1, znak)
+    // Na obrazovku: znak + barva (svetle zelena na cerne)
+    Pokud (znak == '\n') {
+        vga_pozice = (vga_pozice / 80 + 1) * 80
+    } Jinak {
+        ZapisBajt(VGA + vga_pozice * 2, znak)
+        ZapisBajt(VGA + vga_pozice * 2 + 1, 10)
+        vga_pozice = vga_pozice + 1
+    }
+}
+
+Metoda PisText(text) {
+    Lokalni i = 0
+    Dokud (CtiBajt(text + i) != 0) {
+        PisZnak(CtiBajt(text + i))
+        i = i + 1
+    }
+}
+
+Metoda PisCislo(cislo) {
+    Pokud (cislo >= 10) { PisCislo(cislo / 10) }
+    PisZnak('0' + cislo % 10)
+}
+
+Metoda Faktorial(n) {
+    Pokud (n <= 1) { Vrat 1 }
+    Vrat n * Faktorial(n - 1)
+}
+
+Metoda Hlavni() {
+    PisText("Ahoj ze systemu Pramen!\n")
+    PisText("Jadro bezi v 64bitovem rezimu x86, bez knihovny C.\n")
+    PisText("20! = ")
+    PisCislo(Faktorial(20))
+    PisText("\n")
+    PortZapis(0xF4, 0)                  // QEMU isa-debug-exit: ukonci emulator
+}

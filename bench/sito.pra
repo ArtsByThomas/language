@@ -1,0 +1,20 @@
+// Eratosthenovo sito do 20 milionu
+Metoda Hlavni() {
+    Lokalni n = 20000000
+    Lokalni p = Alokuj (n + 1) * 8
+    Lokalni pocet = 0
+    Lokalni i = 2
+    Dokud (i <= n) {
+        Pokud (p[i] == 0) {
+            pocet = pocet + 1
+            Lokalni j = i * i
+            Dokud (j <= n) {
+                p[j] = 1
+                j = j + i
+            }
+        }
+        i = i + 1
+    }
+    Vypis pocet
+    Vrat 0
+}

@@ -1,0 +1,59 @@
+// ==========================================================================
+// Ukazkove jadro operacniho systemu v jazyce Pramen (ARM64, QEMU stroj "virt")
+//
+// Preklad:  pramen jadro_arm.pra jadro --cil=kernel-arm
+// Spusteni: qemu-system-aarch64 -M virt -cpu cortex-a53 -nographic -kernel jadro.elf
+//
+// Jadro bezi bez operacniho systemu a bez knihovny C: vse, co vypise, posila
+// primo do registru seriove linky (UART PL011) pomoci vestavene metody Zapis32.
+// ==========================================================================
+
+Konstanta UART_DATA   = 0x09000000   // datovy registr PL011
+Konstanta UART_STAV   = 0x09000018   // stavovy registr (bit 5 = vysilac plny)
+Konstanta VYSILAC_PLNY = 32
+
+// Posle jeden znak na seriovou linku
+Metoda PisZnak(znak) {
+    // Cekame, dokud ma vysilac misto. Cteni registru optimalizator nikdy nevynecha.
+    Dokud ((Cti32(UART_STAV) & VYSILAC_PLNY) != 0) { }
+    Zapis32(UART_DATA, znak)
+}
+
+// Posle text zakonceny nulou
+Metoda PisText(text) {
+    Lokalni i = 0
+    Lokalni znak = CtiBajt(text)
+    Dokud (znak != 0) {
+        PisZnak(znak)
+        i = i + 1
+        znak = CtiBajt(text + i)
+    }
+}
+
+// Vypise cele cislo v desitkove soustave
+Metoda PisCislo(cislo) {
+    Pokud (cislo < 0) { PisZnak('-'); cislo = 0 - cislo }
+    Pokud (cislo >= 10) { PisCislo(cislo / 10) }
+    PisZnak('0' + cislo % 10)
+}
+
+// Vypne virtualni pocitac (rozhrani PSCI: SYSTEM_OFF = 0x84000008)
+Metoda Vypni() {
+    Asm "arm:movz x0, #0x0008"
+    Asm "arm:movk x0, #0x8400, lsl #16"
+    Asm "arm:hvc #0"
+}
+
+Metoda Fib(n) {
+    Pokud (n < 2) { Vrat n }
+    Vrat Fib(n - 1) + Fib(n - 2)
+}
+
+Metoda Hlavni() {
+    PisText("Ahoj ze systemu Pramen!\n")
+    PisText("Jadro bezi na holem procesoru ARM64, bez knihovny C.\n")
+    PisText("Fib(20) = ")
+    PisCislo(Fib(20))
+    PisText("\nVypinam...\n")
+    Vypni()
+}

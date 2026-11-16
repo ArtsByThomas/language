@@ -1,0 +1,20 @@
+// Promenne, pocitani a podminky
+Metoda Hlavni() {
+    Lokalni jablka = 7
+    Lokalni hrusky = 5
+    Lokalni celkem = jablka + hrusky
+    Vypis "Ovoce celkem:"
+    Vypis celkem
+
+    Pokud (celkem > 10) {
+        Vypis "To je hodne ovoce."
+    } Jinak {
+        Vypis "To je malo ovoce."
+    }
+
+    Lokalni cena : Float = 12.5
+    Vypis "Cena za kus a za vse:"
+    Vypis cena
+    Vypis cena * celkem
+    Vrat 0
+}
